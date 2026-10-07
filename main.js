@@ -34,9 +34,9 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 ));
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
-// node_modules/.pnpm/diff-match-patch@1.0.5/node_modules/diff-match-patch/index.js
+// node_modules/diff-match-patch/index.js
 var require_diff_match_patch = __commonJS({
-  "node_modules/.pnpm/diff-match-patch@1.0.5/node_modules/diff-match-patch/index.js"(exports, module2) {
+  "node_modules/diff-match-patch/index.js"(exports, module2) {
     var diff_match_patch2 = function() {
       this.Diff_Timeout = 1;
       this.Diff_EditCost = 4;
