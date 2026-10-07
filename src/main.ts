@@ -5,6 +5,13 @@ import { CloudSyncSettingTab } from './ui/settings';
 import { t } from './i18n';
 import { encryptDeviceSecret, decryptDeviceSecret } from './security';
 
+interface StoredSettingsData extends Partial<SyncPluginSettings> {
+  encDeviceToken?: string;
+  encPassphrase?: string;
+  deviceToken?: string;
+  passphrase?: string;
+}
+
 export default class CloudSyncPlugin extends Plugin {
   settings: SyncPluginSettings = DEFAULT_SETTINGS;
   syncEngine: SyncEngine | null = null;
@@ -51,7 +58,7 @@ export default class CloudSyncPlugin extends Plugin {
   }
 
   async loadSettings(): Promise<void> {
-    const rawData = (await this.loadData()) || {};
+    const rawData = ((await this.loadData()) as StoredSettingsData | null) || {};
 
     const tokenSource = rawData.encDeviceToken || rawData.deviceToken || '';
     const passSource = rawData.encPassphrase || rawData.passphrase || '';
@@ -90,7 +97,7 @@ export default class CloudSyncPlugin extends Plugin {
     await this.saveData(toStore);
 
     if (this.syncEngine) {
-      this.syncEngine.updateSettings(this.settings);
+      await this.syncEngine.updateSettings(this.settings);
     }
   }
 

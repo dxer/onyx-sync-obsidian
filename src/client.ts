@@ -49,7 +49,7 @@ export class SyncApiClient {
       method: 'GET',
       headers: this.getHeaders()
     });
-    return res.json;
+    return res.json as SessionInfoResponse;
   }
 
   async getStatus(): Promise<SyncStatusResponse> {
@@ -58,7 +58,7 @@ export class SyncApiClient {
       method: 'GET',
       headers: this.getHeaders()
     });
-    return res.json;
+    return res.json as SyncStatusResponse;
   }
 
   async getChanges(sinceVersion: number): Promise<ChangesResponse> {
@@ -67,7 +67,7 @@ export class SyncApiClient {
       method: 'GET',
       headers: this.getHeaders()
     });
-    return res.json;
+    return res.json as ChangesResponse;
   }
 
   async commit(changes: CommitChangeItem[], requestId?: string): Promise<CommitResult> {
@@ -77,7 +77,7 @@ export class SyncApiClient {
       headers: this.getHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ requestId, changes })
     });
-    return res.json;
+    return res.json as CommitResult;
   }
 
   async checkBlobs(hashes: string[]): Promise<BlobCheckResponse> {
@@ -87,15 +87,17 @@ export class SyncApiClient {
       headers: this.getHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ hashes })
     });
-    return res.json;
+    return res.json as BlobCheckResponse;
   }
 
   async uploadBlob(hash: string, data: Uint8Array): Promise<void> {
+    const slice = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+    const bodyBuffer: ArrayBuffer = slice instanceof ArrayBuffer ? slice : new Uint8Array(data).buffer as ArrayBuffer;
     await requestUrl({
       url: `${this.baseUrl}/api/v1/sync/blobs/${hash}`,
       method: 'PUT',
       headers: this.getHeaders({ 'Content-Type': 'application/octet-stream' }),
-      body: data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer
+      body: bodyBuffer
     });
   }
 
@@ -119,6 +121,6 @@ export class SyncApiClient {
     if (res.status !== 200) {
       throw new Error(`WebSocket ticket request failed: ${res.status}`);
     }
-    return res.json;
+    return res.json as { ticket: string; expiresIn: number };
   }
 }

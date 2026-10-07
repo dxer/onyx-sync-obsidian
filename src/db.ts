@@ -1,5 +1,10 @@
 import type { ClientFileMeta, LocalBaseSnapshot } from '@onyx/shared';
 
+function toError(error: unknown, fallbackMessage = 'Database operation failed'): Error {
+  if (error instanceof Error) return error;
+  return new Error(error ? String(error) : fallbackMessage);
+}
+
 export class LocalSyncDb {
   private db: IDBDatabase | null = null;
   private dbName: string;
@@ -44,7 +49,7 @@ export class LocalSyncDb {
       };
 
       request.onerror = () => {
-        reject(request.error);
+        reject(toError(request.error, 'Failed to open database'));
       };
     });
   }
@@ -69,8 +74,11 @@ export class LocalSyncDb {
     return new Promise((resolve, reject) => {
       const store = this.getStore('meta', 'readonly');
       const req = store.get(key);
-      req.onsuccess = () => resolve(req.result ? req.result.value : null);
-      req.onerror = () => reject(req.error);
+      req.onsuccess = () => {
+        const res = req.result as { key: string; value: T } | undefined;
+        resolve(res ? res.value : null);
+      };
+      req.onerror = () => reject(toError(req.error));
     });
   }
 
@@ -79,7 +87,7 @@ export class LocalSyncDb {
       const store = this.getStore('meta', 'readwrite');
       const req = store.put({ key, value });
       req.onsuccess = () => resolve();
-      req.onerror = () => reject(req.error);
+      req.onerror = () => reject(toError(req.error));
     });
   }
 
@@ -88,8 +96,8 @@ export class LocalSyncDb {
     return new Promise((resolve, reject) => {
       const store = this.getStore('files', 'readonly');
       const req = store.get(path);
-      req.onsuccess = () => resolve(req.result || null);
-      req.onerror = () => reject(req.error);
+      req.onsuccess = () => resolve((req.result as ClientFileMeta) || null);
+      req.onerror = () => reject(toError(req.error));
     });
   }
 
@@ -98,7 +106,7 @@ export class LocalSyncDb {
       const store = this.getStore('files', 'readwrite');
       const req = store.put(file);
       req.onsuccess = () => resolve();
-      req.onerror = () => reject(req.error);
+      req.onerror = () => reject(toError(req.error));
     });
   }
 
@@ -108,10 +116,14 @@ export class LocalSyncDb {
       const index = store.indexNames.contains('byId') ? store.index('byId') : null;
       const req = index ? index.get(id) : store.getAll();
       req.onsuccess = () => {
-        const value = req.result;
-        resolve(Array.isArray(value) ? value.find((file) => file.id === id) || null : value || null);
+        const value = req.result as ClientFileMeta | ClientFileMeta[] | undefined;
+        if (Array.isArray(value)) {
+          resolve(value.find((file) => file.id === id) || null);
+        } else {
+          resolve(value || null);
+        }
       };
-      req.onerror = () => reject(req.error);
+      req.onerror = () => reject(toError(req.error));
     });
   }
 
@@ -120,7 +132,7 @@ export class LocalSyncDb {
       const store = this.getStore('outbox', 'readwrite');
       const req = store.put(item);
       req.onsuccess = () => resolve();
-      req.onerror = () => reject(req.error);
+      req.onerror = () => reject(toError(req.error));
     });
   }
 
@@ -129,7 +141,7 @@ export class LocalSyncDb {
       const store = this.getStore('outbox', 'readwrite');
       const req = store.delete(requestId);
       req.onsuccess = () => resolve();
-      req.onerror = () => reject(req.error);
+      req.onerror = () => reject(toError(req.error));
     });
   }
 
@@ -137,8 +149,8 @@ export class LocalSyncDb {
     return new Promise((resolve, reject) => {
       const store = this.getStore('outbox', 'readonly');
       const req = store.getAll();
-      req.onsuccess = () => resolve(req.result || []);
-      req.onerror = () => reject(req.error);
+      req.onsuccess = () => resolve((req.result as T[]) || []);
+      req.onerror = () => reject(toError(req.error));
     });
   }
 
@@ -156,7 +168,7 @@ export class LocalSyncDb {
       const store = this.getStore('files', 'readwrite');
       const req = store.delete(path);
       req.onsuccess = () => resolve();
-      req.onerror = () => reject(req.error);
+      req.onerror = () => reject(toError(req.error));
     });
   }
 
@@ -164,8 +176,8 @@ export class LocalSyncDb {
     return new Promise((resolve, reject) => {
       const store = this.getStore('files', 'readonly');
       const req = store.getAll();
-      req.onsuccess = () => resolve(req.result || []);
-      req.onerror = () => reject(req.error);
+      req.onsuccess = () => resolve((req.result as ClientFileMeta[]) || []);
+      req.onerror = () => reject(toError(req.error));
     });
   }
 
@@ -174,8 +186,8 @@ export class LocalSyncDb {
     return new Promise((resolve, reject) => {
       const store = this.getStore('snapshots', 'readonly');
       const req = store.get(path);
-      req.onsuccess = () => resolve(req.result || null);
-      req.onerror = () => reject(req.error);
+      req.onsuccess = () => resolve((req.result as LocalBaseSnapshot) || null);
+      req.onerror = () => reject(toError(req.error));
     });
   }
 
@@ -189,7 +201,7 @@ export class LocalSyncDb {
         timestamp: Date.now()
       });
       req.onsuccess = () => resolve();
-      req.onerror = () => reject(req.error);
+      req.onerror = () => reject(toError(req.error));
     });
   }
 
@@ -198,7 +210,7 @@ export class LocalSyncDb {
       const store = this.getStore('snapshots', 'readwrite');
       const req = store.delete(path);
       req.onsuccess = () => resolve();
-      req.onerror = () => reject(req.error);
+      req.onerror = () => reject(toError(req.error));
     });
   }
 }

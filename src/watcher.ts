@@ -65,7 +65,8 @@ export class VaultWatcher {
 
   private shouldIgnore(path: string): boolean {
     const norm = normalizePath(path);
-    if (norm.startsWith('.obsidian') || norm.startsWith('.trash') || norm.startsWith('.git')) {
+    const configDir = this.app.vault.configDir || '.obsidian';
+    if (norm.startsWith(configDir) || norm.startsWith('.trash') || norm.startsWith('.git')) {
       return true;
     }
     if (norm.endsWith('.DS_Store') || norm === '.DS_Store') {

@@ -8,9 +8,20 @@ const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
 // Helper to get crypto implementation
+function getCrypto(): Crypto {
+  if (typeof window !== 'undefined' && window.crypto) {
+    return window.crypto;
+  }
+  if (typeof globalThis !== 'undefined' && globalThis.crypto) {
+    return globalThis.crypto;
+  }
+  throw new Error('Web Crypto API is not available in this environment');
+}
+
 function getSubtleCrypto(): SubtleCrypto {
-  if (typeof globalThis.crypto !== 'undefined' && globalThis.crypto.subtle) {
-    return globalThis.crypto.subtle;
+  const c = getCrypto();
+  if (c.subtle) {
+    return c.subtle;
   }
   throw new Error('Web Crypto API (crypto.subtle) is not available in this environment');
 }
@@ -20,7 +31,7 @@ function getSubtleCrypto(): SubtleCrypto {
  */
 export function getRandomBytes(byteLength: number): Uint8Array {
   const bytes = new Uint8Array(byteLength);
-  globalThis.crypto.getRandomValues(bytes);
+  getCrypto().getRandomValues(bytes);
   return bytes;
 }
 
@@ -37,7 +48,8 @@ export function generateSalt(): Uint8Array {
 export function bytesToHex(bytes: Uint8Array): string {
   let hex = '';
   for (let i = 0; i < bytes.length; i++) {
-    hex += bytes[i].toString(16).padStart(2, '0');
+    const b = bytes[i];
+    hex += (typeof b === 'number' ? b : 0).toString(16).padStart(2, '0');
   }
   return hex;
 }
@@ -97,7 +109,7 @@ export async function deriveMasterKey(passphrase: string, salt: Uint8Array): Pro
   const derivedBits = await subtle.deriveBits(
     {
       name: 'PBKDF2',
-      salt,
+      salt: salt as unknown as BufferSource,
       iterations: 100000,
       hash: 'SHA-256'
     },
@@ -169,10 +181,10 @@ export async function encryptData(data: Uint8Array | string, dataKey: CryptoKey)
   const encryptedBuffer = await subtle.encrypt(
     {
       name: 'AES-GCM',
-      iv
+      iv: iv as unknown as BufferSource
     },
     dataKey,
-    rawBytes
+    rawBytes as unknown as BufferSource
   );
 
   const ciphertextWithTag = new Uint8Array(encryptedBuffer);
@@ -196,13 +208,13 @@ export async function decryptData(encryptedBytes: Uint8Array, dataKey: CryptoKey
   const iv = encryptedBytes.slice(0, 12);
   const ciphertextWithTag = encryptedBytes.slice(12);
 
-  const decryptedBuffer = await subtle.decrypt(
+    const decryptedBuffer = await subtle.decrypt(
     {
       name: 'AES-GCM',
-      iv
+      iv: iv as unknown as BufferSource
     },
     dataKey,
-    ciphertextWithTag
+    ciphertextWithTag as unknown as BufferSource
   );
 
   return new Uint8Array(decryptedBuffer);
@@ -228,7 +240,7 @@ export async function calculateContentHmac(data: Uint8Array | string, hmacKey: C
   const signatureBuffer = await subtle.sign(
     'HMAC',
     hmacKey,
-    rawBytes
+    rawBytes as unknown as BufferSource
   );
 
   return bytesToHex(new Uint8Array(signatureBuffer));

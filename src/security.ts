@@ -21,11 +21,23 @@ import {
   hexToBytes
 } from '@onyx/shared';
 
-const textEncoder = new TextEncoder();
+interface ElectronSafeStorage {
+  isEncryptionAvailable(): boolean;
+  encryptString(plainText: string): Buffer;
+  decryptString(encrypted: Buffer): string;
+}
 
-function getElectronSafeStorage(): any {
+interface WindowWithRequire extends Window {
+  require?: (moduleName: string) => {
+    safeStorage?: ElectronSafeStorage;
+    Buffer?: typeof Buffer;
+  };
+}
+
+function getElectronSafeStorage(): ElectronSafeStorage | null {
   try {
-    const req = (window as any).require || (typeof require !== 'undefined' ? require : null);
+    const win = window as WindowWithRequire;
+    const req = win.require || (typeof require !== 'undefined' ? require : null);
     if (req) {
       const electron = req('electron');
       if (electron?.safeStorage?.isEncryptionAvailable()) {
@@ -55,7 +67,7 @@ async function getOrCreateSandboxDeviceKey(): Promise<CryptoKey> {
   const rawBytes = hexToBytes(hexSecret);
   return crypto.subtle.importKey(
     'raw',
-    rawBytes,
+    rawBytes as unknown as BufferSource,
     { name: 'AES-GCM', length: 256 },
     false,
     ['encrypt', 'decrypt']
@@ -107,9 +119,11 @@ export async function decryptDeviceSecret(ciphertextWithPrefix: string): Promise
 
     try {
       const hex = ciphertextWithPrefix.slice(6);
-      const req = (window as any).require || require;
-      const BufferClass = req('buffer').Buffer;
-      const buf = BufferClass.from(hex, 'hex');
+      const win = window as WindowWithRequire;
+      const req = win.require || (typeof require !== 'undefined' ? require : null);
+      if (!req) return '';
+      const BufferModule = req('buffer');
+      const buf = BufferModule?.Buffer ? BufferModule.Buffer.from(hex, 'hex') : Buffer.from(hex, 'hex');
       return safeStorage.decryptString(buf);
     } catch {
       console.warn('🛡️ [Cloud Sync Security Alert] DPAPI Decryption failed! The config file may have been copied from another computer. Access denied.');

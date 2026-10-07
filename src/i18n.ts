@@ -1,3 +1,5 @@
+import { getLanguage } from 'obsidian';
+
 export type Locale = 'en' | 'zh';
 
 const en = {
@@ -14,7 +16,7 @@ const en = {
   syncFailedNotice: 'Sync failed: {error}',
 
   // Connection & Settings
-  settingsTitle: 'Onyx Sync (E2EE) — for Obsidian',
+  settingsTitle: 'Onyx Sync (E2EE)',
   connectionStatusHeader: 'Connection Status',
   statusConnected: 'Connected: {vaultName} ({deviceName}, v{version})',
   statusDisconnected: 'Disconnected (Please configure Server URL and Device Token)',
@@ -93,7 +95,7 @@ const zh: typeof en = {
 const translations = { en, zh };
 
 export function getCurrentLocale(): Locale {
-  const lang = (window.localStorage.getItem('language') || document.documentElement.lang || navigator.language || '').toLowerCase();
+  const lang = (typeof getLanguage === 'function' ? getLanguage() : (document.documentElement.lang || navigator.language || '')).toLowerCase();
   if (lang.startsWith('zh')) {
     return 'zh';
   }
@@ -105,7 +107,8 @@ export function t(key: keyof typeof en, params: Record<string, string | number> 
   const dict = translations[locale] || translations.en;
   let text = dict[key] || translations.en[key] || key;
 
-  for (const [paramKey, paramVal] of Object.entries(params)) {
+  for (const paramKey of Object.keys(params)) {
+    const paramVal = params[paramKey];
     text = text.replace(new RegExp(`\\{${paramKey}\\}`, 'g'), String(paramVal));
   }
 

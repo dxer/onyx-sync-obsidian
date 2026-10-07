@@ -32,7 +32,7 @@ export class CloudSyncSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
-    containerEl.createEl('h2', { text: t('settingsTitle') });
+    new Setting(containerEl).setName(t('settingsTitle')).setHeading();
 
     // 1. Connection Status Card — rendered immediately from cached info, then
     // refreshed asynchronously so a slow server never blanks the settings tab.
@@ -142,7 +142,7 @@ export class CloudSyncSettingTab extends PluginSettingTab {
       });
 
     // Actions Header
-    containerEl.createEl('h3', { text: t('actionsHeader') });
+    new Setting(containerEl).setName(t('actionsHeader')).setHeading();
 
     // Test Connection — builds the client from the CURRENT settings so edits
     // made in this tab are what gets tested.
@@ -175,8 +175,9 @@ export class CloudSyncSettingTab extends PluginSettingTab {
               })
             );
             this.display();
-          } catch (err: any) {
-            new Notice(t('serverUnreachable') + ` ${err.message || String(err)}`);
+          } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : String(err);
+            new Notice(`${t('serverUnreachable')} ${msg}`);
           } finally {
             button.setDisabled(false);
             button.setButtonText(t('testConnectBtn'));

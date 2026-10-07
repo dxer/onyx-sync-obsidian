@@ -11,9 +11,11 @@
     "importHelpers": true,
     "isolatedModules": true,
     "strictNullChecks": true,
+    "skipLibCheck": true,
     "paths": {
       "@onyx/shared": ["./src/shared/index.ts"]
     }
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts"],
+  "exclude": ["src/**/__tests__/**", "node_modules"]
 }

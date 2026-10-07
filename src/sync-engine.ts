@@ -45,9 +45,16 @@ function outboxBackoffMs(attempts: number): number {
   return Math.min(OUTBOX_BACKOFF_BASE_MS * 2 ** Math.max(0, attempts - 1), OUTBOX_BACKOFF_MAX_MS);
 }
 
+interface ExtendedApp extends App {
+  appId?: string;
+}
+interface ExtendedAdapter {
+  basePath?: string;
+}
+
 function getLocalVaultKey(app: App): string {
-  const appId = (app as any).appId || '';
-  const basePath = (app.vault.adapter as any).basePath || '';
+  const appId = (app as ExtendedApp).appId || '';
+  const basePath = (app.vault.adapter as unknown as ExtendedAdapter).basePath || '';
   const vaultName = app.vault.getName() || 'vault';
   const raw = `${appId}_${basePath}_${vaultName}`;
   let hash = 0;
@@ -98,6 +105,10 @@ export class SyncEngine {
   private inFlightDirty = new Set<string>();
   private inFlightDeletes = new Set<string>();
   private inFlightRenames = new Map<string, string>();
+
+  private get configDir(): string {
+    return this.app.vault.configDir || '.obsidian';
+  }
 
   constructor(
     app: App,
@@ -253,7 +264,7 @@ export class SyncEngine {
     let lastVersion = (await this.db.getMeta<number>('last_synced_version')) || 0;
 
     const localUserFiles = this.app.vault.getFiles().filter(
-      (f) => !f.path.startsWith('.obsidian') && !f.path.startsWith('.trash')
+      (f) => !f.path.startsWith(this.configDir) && !f.path.startsWith('.trash')
     );
     if (localUserFiles.length === 0 && remoteStatus.latestVersion > 0) {
       lastVersion = 0;
@@ -289,16 +300,19 @@ export class SyncEngine {
       if (options.force) {
         new Notice(t('syncSuccessNotice'));
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
       this.restoreInFlightEvents();
       console.error('[Obsidian Cloud Sync] Sync failed:', err);
       this.onStatusChange('error');
-      new Notice(t('syncFailedNotice', { error: err.message || String(err) }));
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      new Notice(t('syncFailedNotice', { error: errorMsg }));
     } finally {
       this.isSyncing = false;
       if (this.wakeRequested) {
         this.wakeRequested = false;
-        queueMicrotask(() => this.sync().catch(console.error));
+        queueMicrotask(() => {
+          void this.sync().catch(console.error);
+        });
       }
     }
   }
@@ -334,16 +348,13 @@ export class SyncEngine {
       const text = textDecoder.decode(bytes);
       await this.app.vault.adapter.write(norm, text);
     } else {
-      const cleanBuffer = bytes.buffer.slice(
+      const slice = bytes.buffer.slice(
         bytes.byteOffset,
         bytes.byteOffset + bytes.byteLength
-      ) as ArrayBuffer;
+      );
+      const binaryData: ArrayBuffer = slice instanceof ArrayBuffer ? slice : new Uint8Array(bytes).buffer as ArrayBuffer;
 
-      if (typeof this.app.vault.adapter.writeBinary === 'function') {
-        await this.app.vault.adapter.writeBinary(norm, cleanBuffer);
-      } else {
-        await (this.app.vault.adapter as any).write(norm, cleanBuffer);
-      }
+      await this.app.vault.adapter.writeBinary(norm, binaryData);
     }
   }
 
@@ -530,7 +541,6 @@ export class SyncEngine {
 
     const changesToCommit: CommitChangeItem[] = [];
     const blobsToUpload = new Map<string, Uint8Array>();
-    const renameRecords = new Map<string, ClientFileMeta>();
 
     // 1. Process explicit deletes
     for (const deletedPath of claimedDeletes) {
@@ -549,7 +559,7 @@ export class SyncEngine {
     }
     // 2. Process modified/created files
     for (const path of pathsToCheck) {
-      if (path.startsWith('.obsidian') || path.startsWith('.trash') || path.startsWith('.git')) {
+      if (path.startsWith(this.configDir) || path.startsWith('.trash') || path.startsWith('.git')) {
         continue;
       }
 
@@ -604,7 +614,9 @@ export class SyncEngine {
     // Persist the complete operation before any network side effect. From this
     // point on the claimed watcher events are durably captured by the outbox,
     // so they must never be restored into the pending sets on failure.
-    const requestId = globalThis.crypto.randomUUID();
+    const winObj = typeof window !== 'undefined' ? (window as unknown as { activeWindow?: Window; crypto?: Crypto }) : null;
+    const cryptoInstance = winObj?.activeWindow?.crypto || winObj?.crypto || globalThis.crypto;
+    const requestId = cryptoInstance.randomUUID();
     const outbox: PendingOutbox = {
       requestId,
       changes: changesToCommit,
@@ -800,9 +812,9 @@ export class SyncEngine {
 
     this.ws.onmessage = (event) => {
       try {
-        const data = JSON.parse(event.data);
-        if (data.event === 'version_bump') {
-          this.sync({ force: true }).catch(console.error);
+        const data = JSON.parse(String(event.data)) as { event?: string };
+        if (data && typeof data === 'object' && data.event === 'version_bump') {
+          void this.sync({ force: true }).catch(console.error);
         }
       } catch {
         // ignore
