@@ -22,30 +22,26 @@ import {
 } from '@onyx/shared';
 
 interface ElectronSafeStorage {
-  isEncryptionAvailable(): boolean;
-  encryptString(plainText: string): Buffer;
-  decryptString(encrypted: Buffer): string;
+  isEncryptionAvailable: () => boolean;
+  encryptString: (plainText: string) => Uint8Array;
+  decryptString: (encrypted: Uint8Array) => string;
 }
 
-interface WindowWithRequire extends Window {
-  require?: (moduleName: string) => {
-    safeStorage?: ElectronSafeStorage;
-    Buffer?: typeof Buffer;
-  };
+interface ElectronModule {
+  safeStorage?: ElectronSafeStorage;
 }
 
-function getElectronSafeStorage(): ElectronSafeStorage | null {
+function getSafeStorage(): ElectronSafeStorage | null {
   try {
-    const win = window as WindowWithRequire;
-    const req = win.require || (typeof require !== 'undefined' ? require : null);
-    if (req) {
-      const electron = req('electron');
+    const customRequire = (window as unknown as { require?: (name: string) => ElectronModule }).require;
+    if (typeof customRequire === 'function') {
+      const electron = customRequire('electron');
       if (electron?.safeStorage?.isEncryptionAvailable()) {
         return electron.safeStorage;
       }
     }
   } catch {
-    // Mobile or isolated environment
+    // Mobile or sandbox environment
   }
   return null;
 }
@@ -65,9 +61,10 @@ async function getOrCreateSandboxDeviceKey(): Promise<CryptoKey> {
   }
 
   const rawBytes = hexToBytes(hexSecret);
-  return crypto.subtle.importKey(
+  const buffer = rawBytes.buffer instanceof ArrayBuffer ? rawBytes.buffer : new Uint8Array(rawBytes).slice().buffer;
+  return window.crypto.subtle.importKey(
     'raw',
-    rawBytes as unknown as BufferSource,
+    buffer,
     { name: 'AES-GCM', length: 256 },
     false,
     ['encrypt', 'decrypt']
@@ -80,13 +77,13 @@ async function getOrCreateSandboxDeviceKey(): Promise<CryptoKey> {
 export async function encryptDeviceSecret(plaintext: string): Promise<string> {
   if (!plaintext) return '';
 
-  const safeStorage = getElectronSafeStorage();
+  const safeStorage = getSafeStorage();
 
   // Level 1: Hardware-backed OS DPAPI / Keychain (Desktop)
   if (safeStorage) {
     try {
-      const encryptedBuffer = safeStorage.encryptString(plaintext);
-      return 'dpapi:' + (encryptedBuffer as Buffer).toString('hex');
+      const encryptedBytes = safeStorage.encryptString(plaintext);
+      return 'dpapi:' + bytesToHex(new Uint8Array(encryptedBytes));
     } catch (err) {
       console.warn('[Cloud Sync] safeStorage encryption failed, falling back to sandbox key:', err);
     }
@@ -111,7 +108,7 @@ export async function decryptDeviceSecret(ciphertextWithPrefix: string): Promise
 
   // 1. Decrypt DPAPI (Windows DPAPI / Mac Keychain)
   if (ciphertextWithPrefix.startsWith('dpapi:')) {
-    const safeStorage = getElectronSafeStorage();
+    const safeStorage = getSafeStorage();
     if (!safeStorage) {
       console.warn('⚠️ [Cloud Sync] Config was encrypted with OS DPAPI on desktop, cannot decrypt in non-desktop environment.');
       return '';
@@ -119,12 +116,8 @@ export async function decryptDeviceSecret(ciphertextWithPrefix: string): Promise
 
     try {
       const hex = ciphertextWithPrefix.slice(6);
-      const win = window as WindowWithRequire;
-      const req = win.require || (typeof require !== 'undefined' ? require : null);
-      if (!req) return '';
-      const BufferModule = req('buffer');
-      const buf = BufferModule?.Buffer ? BufferModule.Buffer.from(hex, 'hex') : Buffer.from(hex, 'hex');
-      return safeStorage.decryptString(buf);
+      const bytes = hexToBytes(hex);
+      return safeStorage.decryptString(bytes);
     } catch {
       console.warn('🛡️ [Cloud Sync Security Alert] DPAPI Decryption failed! The config file may have been copied from another computer. Access denied.');
       return '';

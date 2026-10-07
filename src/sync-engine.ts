@@ -15,8 +15,7 @@ import type {
   CommitChangeItem,
   CommitResult,
   SyncStatusResponse,
-  SessionInfoResponse,
-  ClientFileMeta
+  SessionInfoResponse
 } from '@onyx/shared';
 import type { SyncPluginSettings, SyncState } from './types';
 import { SyncApiClient } from './client';
@@ -107,7 +106,7 @@ export class SyncEngine {
   private inFlightRenames = new Map<string, string>();
 
   private get configDir(): string {
-    return this.app.vault.configDir || '.obsidian';
+    return this.app.vault.configDir;
   }
 
   constructor(
@@ -352,7 +351,7 @@ export class SyncEngine {
         bytes.byteOffset,
         bytes.byteOffset + bytes.byteLength
       );
-      const binaryData: ArrayBuffer = slice instanceof ArrayBuffer ? slice : new Uint8Array(bytes).buffer as ArrayBuffer;
+      const binaryData = slice instanceof ArrayBuffer ? slice : new Uint8Array(bytes).slice().buffer;
 
       await this.app.vault.adapter.writeBinary(norm, binaryData);
     }
@@ -615,7 +614,7 @@ export class SyncEngine {
     // point on the claimed watcher events are durably captured by the outbox,
     // so they must never be restored into the pending sets on failure.
     const winObj = typeof window !== 'undefined' ? (window as unknown as { activeWindow?: Window; crypto?: Crypto }) : null;
-    const cryptoInstance = winObj?.activeWindow?.crypto || winObj?.crypto || globalThis.crypto;
+    const cryptoInstance = winObj?.activeWindow?.crypto || winObj?.crypto || window.crypto;
     const requestId = cryptoInstance.randomUUID();
     const outbox: PendingOutbox = {
       requestId,

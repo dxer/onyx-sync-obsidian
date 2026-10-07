@@ -92,7 +92,7 @@ export class SyncApiClient {
 
   async uploadBlob(hash: string, data: Uint8Array): Promise<void> {
     const slice = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
-    const bodyBuffer: ArrayBuffer = slice instanceof ArrayBuffer ? slice : new Uint8Array(data).buffer as ArrayBuffer;
+    const bodyBuffer = slice instanceof ArrayBuffer ? slice : new Uint8Array(data).slice().buffer;
     await requestUrl({
       url: `${this.baseUrl}/api/v1/sync/blobs/${hash}`,
       method: 'PUT',

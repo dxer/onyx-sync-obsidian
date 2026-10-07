@@ -4,18 +4,29 @@
     "inlineSourceMap": true,
     "inlineSources": true,
     "module": "ESNext",
-    "target": "ES6",
+    "target": "ES2022",
+    "moduleResolution": "bundler",
     "allowJs": true,
     "noImplicitAny": true,
-    "moduleResolution": "node",
     "importHelpers": true,
     "isolatedModules": true,
     "strictNullChecks": true,
     "skipLibCheck": true,
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
     "paths": {
-      "@onyx/shared": ["./src/shared/index.ts"]
+      "@onyx/shared": [
+        "./src/shared/index.ts"
+      ]
     }
   },
-  "include": ["src/**/*.ts"],
-  "exclude": ["src/**/__tests__/**", "node_modules"]
+  "include": [
+    "src/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules"
+  ]
 }
