@@ -1,8 +1,8 @@
 {
   "id": "onyx-sync",
   "name": "Onyx Sync",
-  "version": "1.0.3",
-  "minAppVersion": "1.8.0",
+  "version": "1.0.4",
+  "minAppVersion": "1.8.7",
   "description": "Zero-knowledge end-to-end encrypted sync engine. Supports VPS self-hosting and Cloudflare Serverless.",
   "author": "dxer",
   "authorUrl": "https://github.com/dxer",
