@@ -1,6 +1,6 @@
 {
   "name": "onyx-sync",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Zero-knowledge end-to-end encrypted sync plugin for Obsidian (Onyx)",
   "main": "main.js",
   "scripts": {
