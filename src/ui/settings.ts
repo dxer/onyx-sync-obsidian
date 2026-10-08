@@ -5,6 +5,21 @@ import { t } from '../i18n';
 
 const SAVE_DEBOUNCE_MS = 600;
 
+/** Human-readable byte size (B / KB / MB / GB), one decimal place above bytes. */
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return '0 B';
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let value = bytes / 1024;
+  let unit = units[0];
+  for (const u of units) {
+    unit = u;
+    if (value < 1024 || u === 'TB') break;
+    value /= 1024;
+  }
+  return `${value >= 100 ? Math.round(value) : Math.round(value * 10) / 10} ${unit}`;
+}
+
 export class CloudSyncSettingTab extends PluginSettingTab {
   plugin: CloudSyncPlugin;
   private saveTimer: number | null = null;
@@ -53,6 +68,13 @@ export class CloudSyncSettingTab extends PluginSettingTab {
     if (cached.serverUrl && cached.deviceToken) {
       void this.refreshSessionStatus(statusEl);
     }
+
+    // 1b. Vault Storage Usage — local plaintext sizes grouped by file format.
+    // Rendered immediately with a placeholder, then filled asynchronously so a
+    // large vault never blocks the settings tab.
+    new Setting(containerEl).setName(t('storageHeader')).setHeading();
+    const storageSetting = new Setting(containerEl).setDesc(t('storageLoading'));
+    void this.refreshStorageStats(storageSetting.descEl);
 
     // 2. Server URL
     new Setting(containerEl)
@@ -290,6 +312,38 @@ export class CloudSyncSettingTab extends PluginSettingTab {
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       new Notice(t('rotateFailedNotice', { error: message }));
+    }
+  }
+
+  private async refreshStorageStats(storageEl: HTMLElement): Promise<void> {
+    const engine = this.plugin.syncEngine;
+    if (!engine) {
+      storageEl.setText(t('storageUnavailable'));
+      return;
+    }
+    try {
+      const stats = await engine.getVaultStorageStats();
+      if (stats.totalFiles === 0) {
+        storageEl.setText(t('storageEmpty'));
+        return;
+      }
+      storageEl.empty();
+      const summary = document.createElement('div');
+      summary.setText(t('storageSummary', { count: stats.totalFiles, size: formatBytes(stats.totalBytes) }));
+      storageEl.appendChild(summary);
+      for (const f of stats.formats) {
+        const row = document.createElement('div');
+        row.setText(
+          t('storageRow', {
+            ext: f.ext ? `.${f.ext}` : t('storageNoExt'),
+            count: f.count,
+            size: formatBytes(f.bytes)
+          })
+        );
+        storageEl.appendChild(row);
+      }
+    } catch {
+      storageEl.setText(t('storageUnavailable'));
     }
   }
 

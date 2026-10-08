@@ -684,6 +684,38 @@ export class SyncEngine {
     return pending.length > 0;
   }
 
+  /** Local vault storage breakdown by file extension (plaintext sizes from the vault). */
+  async getVaultStorageStats(limit = 8): Promise<{
+    totalFiles: number;
+    totalBytes: number;
+    formats: Array<{ ext: string; count: number; bytes: number }>;
+  }> {
+    const files = this.app.vault.getFiles().filter(
+      (f) =>
+        !f.path.startsWith(this.configDir) &&
+        !f.path.startsWith('.trash') &&
+        !f.path.startsWith('.git')
+    );
+    const byExt = new Map<string, { count: number; bytes: number }>();
+    let totalBytes = 0;
+    for (const f of files) {
+      const size = f.stat?.size ?? 0;
+      totalBytes += size;
+      const dot = f.path.lastIndexOf('.');
+      const slash = f.path.lastIndexOf('/');
+      const ext = dot > slash ? f.path.slice(dot + 1).toLowerCase() : '';
+      const entry = byExt.get(ext) ?? { count: 0, bytes: 0 };
+      entry.count += 1;
+      entry.bytes += size;
+      byExt.set(ext, entry);
+    }
+    const formats = [...byExt.entries()]
+      .map(([ext, v]) => ({ ext, ...v }))
+      .sort((a, b) => b.bytes - a.bytes)
+      .slice(0, Math.max(1, limit));
+    return { totalFiles: files.length, totalBytes, formats };
+  }
+
   /** True once this vault has completed at least one sync. */
   hasSyncedBefore(): boolean {
     return this.isInitialized;
