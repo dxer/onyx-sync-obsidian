@@ -68,19 +68,20 @@ export class CloudSyncSettingTab extends PluginSettingTab {
           })
       );
 
-    // 3. Device Access Token
+    // 3. Device Access Token (masked: stored encrypted, never shown in plain text)
     new Setting(containerEl)
       .setName(t('deviceTokenName'))
       .setDesc(t('deviceTokenDesc'))
-      .addText((text) =>
+      .addText((text) => {
+        text.inputEl.type = 'password';
         text
           .setPlaceholder(t('deviceTokenPlaceholder'))
           .setValue(this.plugin.settings.deviceToken)
           .onChange((value) => {
             this.plugin.settings.deviceToken = value.trim();
             this.scheduleSettingsSave();
-          })
-      );
+          });
+      });
 
     // 4. Passphrase (E2EE)
     new Setting(containerEl)
@@ -93,11 +94,28 @@ export class CloudSyncSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.passphrase)
           .onChange((value) => {
             this.plugin.settings.passphrase = value;
+            this.plugin.passphraseEdited = true;
             this.scheduleSettingsSave();
           });
       });
 
-    // 5. Auto Sync
+    // 5. Confirm Passphrase — a freshly typed passphrase is only saved when
+    // both entries match, guarding against typos that would lock you out.
+    new Setting(containerEl)
+      .setName(t('passphraseConfirmName'))
+      .setDesc(t('passphraseConfirmDesc'))
+      .addText((text) => {
+        text.inputEl.type = 'password';
+        text
+          .setPlaceholder(t('passphrasePlaceholder'))
+          .setValue(this.plugin.passphraseConfirm)
+          .onChange((value) => {
+            this.plugin.passphraseConfirm = value;
+            this.scheduleSettingsSave();
+          });
+      });
+
+    // 6. Auto Sync
     new Setting(containerEl)
       .setName(t('autoSyncName'))
       .setDesc(t('autoSyncDesc'))
@@ -110,7 +128,7 @@ export class CloudSyncSettingTab extends PluginSettingTab {
           })
       );
 
-    // 6. Sync Interval
+    // 7. Sync Interval
     new Setting(containerEl)
       .setName(t('syncIntervalName'))
       .setDesc(t('syncIntervalDesc'))
@@ -125,7 +143,7 @@ export class CloudSyncSettingTab extends PluginSettingTab {
         });
       });
 
-    // 7. File Sync Concurrency
+    // 8. File Sync Concurrency
     new Setting(containerEl)
       .setName(t('syncConcurrencyName'))
       .setDesc(t('syncConcurrencyDesc'))
@@ -139,6 +157,48 @@ export class CloudSyncSettingTab extends PluginSettingTab {
           this.scheduleSettingsSave();
         });
       });
+
+    // 9. Rotate Passphrase — for a vault that is already syncing. Re-encrypts
+    // every file with the new passphrase and re-uploads the whole vault;
+    // other devices must enter the new passphrase afterwards. New devices
+    // joining after a rotation just use the main passphrase field above.
+    new Setting(containerEl).setName(t('rotateHeader')).setHeading();
+    new Setting(containerEl).setDesc(t('rotateDesc'));
+
+    let rotatePassphrase = '';
+    let rotateConfirm = '';
+    new Setting(containerEl)
+      .setName(t('passphraseName'))
+      .addText((text) => {
+        text.inputEl.type = 'password';
+        text.setPlaceholder(t('passphrasePlaceholder')).onChange((value) => {
+          rotatePassphrase = value;
+        });
+      });
+    new Setting(containerEl)
+      .setName(t('passphraseConfirmName'))
+      .addText((text) => {
+        text.inputEl.type = 'password';
+        text.setPlaceholder(t('passphrasePlaceholder')).onChange((value) => {
+          rotateConfirm = value;
+        });
+      });
+    new Setting(containerEl).addButton((button) =>
+      button
+        .setButtonText(t('rotateButton'))
+        .setCta()
+        .onClick(async () => {
+          button.setDisabled(true);
+          try {
+            await this.rotatePassphrase(rotatePassphrase, rotateConfirm);
+            rotatePassphrase = '';
+            rotateConfirm = '';
+            this.display();
+          } finally {
+            button.setDisabled(false);
+          }
+        })
+    );
 
     // Actions Header
     new Setting(containerEl).setName(t('actionsHeader')).setHeading();
@@ -196,6 +256,41 @@ export class CloudSyncSettingTab extends PluginSettingTab {
             await this.plugin.triggerSync({ force: true, fullScan: true });
           })
       );
+  }
+
+  private async rotatePassphrase(newPassphrase: string, confirm: string): Promise<void> {
+    const engine = this.plugin.syncEngine;
+    if (!engine) {
+      new Notice(t('rotateNoEngineNotice'));
+      return;
+    }
+    if (!newPassphrase || newPassphrase !== confirm) {
+      new Notice(t('passphraseMismatchNotice'));
+      return;
+    }
+    if (!engine.hasSyncedBefore()) {
+      new Notice(t('rotateNeedInitNotice'));
+      return;
+    }
+    if (await engine.hasPendingOutbox()) {
+      new Notice(t('rotatePendingNotice'));
+      return;
+    }
+
+    // Persist first so a retry (or restart) continues with the new keys;
+    // the rotate fields are the second confirmation, so bypass the edit gate.
+    this.plugin.settings.passphrase = newPassphrase;
+    this.plugin.passphraseEdited = false;
+    this.plugin.passphraseConfirm = '';
+    await this.plugin.saveSettings();
+
+    try {
+      const count = await engine.rotatePassphrase();
+      new Notice(t('rotateSuccessNotice', { count }));
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      new Notice(t('rotateFailedNotice', { error: message }));
+    }
   }
 
   private async refreshSessionStatus(statusEl: HTMLElement): Promise<void> {

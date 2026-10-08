@@ -15,6 +15,10 @@ interface StoredSettingsData extends Partial<SyncPluginSettings> {
 export default class CloudSyncPlugin extends Plugin {
   settings: SyncPluginSettings = DEFAULT_SETTINGS;
   syncEngine: SyncEngine | null = null;
+  /** In-memory only: re-typed passphrase, never persisted. */
+  passphraseConfirm = '';
+  /** Set when the main passphrase field is edited; cleared on successful save. */
+  passphraseEdited = false;
   private statusBarEl: HTMLElement | null = null;
 
   async onload(): Promise<void> {
@@ -81,6 +85,16 @@ export default class CloudSyncPlugin extends Plugin {
   }
 
   async saveSettings(): Promise<void> {
+    // A freshly typed passphrase must be confirmed (typed twice) before it is
+    // persisted: with E2EE a typo silently locks you out of your own vault.
+    if (this.passphraseEdited && this.settings.passphrase) {
+      if (this.settings.passphrase !== this.passphraseConfirm) {
+        new Notice(t('passphraseMismatchNotice'));
+        return;
+      }
+      this.passphraseEdited = false;
+    }
+
     // Encrypt sensitive secrets at rest with hardware/device binding
     const encToken = await encryptDeviceSecret(this.settings.deviceToken);
     const encPass = await encryptDeviceSecret(this.settings.passphrase);

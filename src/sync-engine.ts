@@ -678,7 +678,67 @@ export class SyncEngine {
     return results;
   }
 
-  private async scanAndPush(fullScan: boolean): Promise<void> {
+  /** True when unsent single-file operations are waiting in the outbox. */
+  async hasPendingOutbox(): Promise<boolean> {
+    const pending = await this.db.getAllOutbox<unknown>();
+    return pending.length > 0;
+  }
+
+  /** True once this vault has completed at least one sync. */
+  hasSyncedBefore(): boolean {
+    return this.isInitialized;
+  }
+
+  /**
+   * Re-encrypts every local file with the CURRENT settings.passphrase and
+   * re-uploads the vault (push-only: the server still holds old-key blobs,
+   * which the new keys cannot read yet). The caller must have persisted the
+   * new passphrase already. Returns the number of files processed.
+   */
+  async rotatePassphrase(): Promise<number> {
+    if (this.isSyncing) {
+      throw new Error('Sync is already in progress, please try again in a moment');
+    }
+    if (!this.hasSyncedBefore()) {
+      throw new Error('This vault has not been synced yet');
+    }
+    if (await this.hasPendingOutbox()) {
+      throw new Error('Please run a normal sync first so no unsent changes are left behind');
+    }
+    if (!this.settings.passphrase) {
+      throw new Error('Passphrase is not set');
+    }
+
+    // Re-derive keys from the (new) passphrase; the handshake also refreshes
+    // the session so a revoked token fails fast instead of mid-rotation.
+    this.dataKey = null;
+    this.hmacKey = null;
+    this.currentSession = null;
+    await this.ensureCryptoKeys();
+
+    this.isSyncing = true;
+    this.onStatusChange('syncing');
+    try {
+      const processed = await this.scanAndPush(true);
+      this.lastReportedError = null;
+      this.onStatusChange('idle');
+      return processed;
+    } catch (err) {
+      this.restoreInFlightEvents();
+      this.onStatusChange('error');
+      throw err;
+    } finally {
+      this.isSyncing = false;
+      if (this.wakeRequested) {
+        this.wakeRequested = false;
+        queueMicrotask(() => {
+          void this.sync().catch(console.error);
+        });
+      }
+    }
+  }
+
+  private async scanAndPush(fullScan: boolean): Promise<number> {
     const pathsToCheck = new Set<string>();
 
     const claimedDirty = new Set(this.dirtyPaths);
@@ -726,7 +786,7 @@ export class SyncEngine {
       this.inFlightDirty.clear();
       this.inFlightDeletes.clear();
       this.inFlightRenames.clear();
-      return;
+      return 0;
     }
 
     let nextTask = 0;
@@ -753,6 +813,7 @@ export class SyncEngine {
     this.inFlightDirty.clear();
     this.inFlightDeletes.clear();
     this.inFlightRenames.clear();
+    return tasks.length;
   }
 
   private async processSyncTask(
