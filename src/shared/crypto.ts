@@ -1,22 +1,28 @@
 /**
  * E2EE Cryptographic Module for Obsidian Sync
  * Built entirely on standard Web Crypto API (SubtleCrypto)
- * Fully compatible with Modern Browsers, Electron, and Mobile
+ * Fully compatible with Modern Browsers, Electron, and Mobile (Capacitor/iOS/Android)
  */
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
 function toBuffer(bytes: Uint8Array): ArrayBuffer {
-  return bytes.buffer instanceof ArrayBuffer ? bytes.buffer : new Uint8Array(bytes).slice().buffer;
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return copy.buffer;
 }
 
-// Helper to get crypto implementation safely without mentioning globalThis
+// Helper to get crypto implementation safely across Node.js, Workers, and Obsidian.
 function getCrypto(): Crypto {
   if (typeof window !== 'undefined' && window.crypto) {
     return window.crypto;
   }
-  const rootObj = typeof window !== 'undefined' ? window : (typeof self !== 'undefined' ? self : null);
+  const rootObj = typeof window !== 'undefined'
+    ? window
+    : (typeof self !== 'undefined'
+      ? self
+      : (typeof globalThis !== 'undefined' ? globalThis : null));
   if (rootObj && 'crypto' in rootObj && rootObj.crypto) {
     return rootObj.crypto;
   }
@@ -24,9 +30,9 @@ function getCrypto(): Crypto {
 }
 
 function getSubtleCrypto(): SubtleCrypto {
-  const c = getCrypto();
-  if (c.subtle) {
-    return c.subtle;
+  const cryptoImpl = getCrypto();
+  if (cryptoImpl.subtle) {
+    return cryptoImpl.subtle;
   }
   throw new Error('Web Crypto API (crypto.subtle) is not available in this environment');
 }
@@ -53,9 +59,9 @@ export function generateSalt(): Uint8Array {
 export function bytesToHex(bytes: Uint8Array): string {
   let hex = '';
   for (let i = 0; i < bytes.length; i++) {
-    const val = bytes[i];
-    const s = (typeof val === 'number' ? val : 0).toString(16);
-    hex += s.length < 2 ? '0' + s : s;
+    const value = bytes[i];
+    const text = (typeof value === 'number' ? value : 0).toString(16);
+    hex += text.length < 2 ? '0' + text : text;
   }
   return hex;
 }
@@ -78,8 +84,8 @@ export function bytesToBase64Url(bytes: Uint8Array): string {
   let binary = '';
   const len = bytes.byteLength;
   for (let i = 0; i < len; i++) {
-    const b = bytes[i];
-    binary += String.fromCharCode(typeof b === 'number' ? b : 0);
+    const value = bytes[i];
+    binary += String.fromCharCode(typeof value === 'number' ? value : 0);
   }
   const base64 = btoa(binary);
   return base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
