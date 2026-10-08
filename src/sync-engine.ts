@@ -25,6 +25,9 @@ import { t } from './i18n';
 
 const textDecoder = new TextDecoder();
 
+/** Remote changes are pulled page by page so a large vault cannot OOM the client. */
+const CHANGES_PAGE_SIZE = 200;
+
 type PendingOutbox = {
   requestId: string;
   changes: CommitChangeItem[];
@@ -409,30 +412,36 @@ export class SyncEngine {
 
   private async pullAndMerge(lastVersion: number): Promise<void> {
     const dataKey = this.dataKey!;
-    const changesResp = await this.client.getChanges(lastVersion);
-
-    if (!this.currentSession || changesResp.vaultId !== this.currentSession.vaultId || !Array.isArray(changesResp.changes)) {
-      throw new Error('Invalid changes response');
-    }
-    if (!Number.isSafeInteger(changesResp.latestVersion) || changesResp.latestVersion < lastVersion) {
-      throw new Error('Invalid changes response version');
-    }
-
-    let previousVersion = lastVersion;
-    for (const change of changesResp.changes) {
-      if (!Number.isSafeInteger(change.version) || change.version <= lastVersion || change.version < previousVersion || change.version > changesResp.latestVersion) {
-        throw new Error(`Invalid remote change version: ${change.version}`);
-      }
-      previousVersion = change.version;
-    }
-
-    if (changesResp.changes.length === 0) {
-      await this.db.setMeta('last_synced_version', changesResp.latestVersion);
-      return;
-    }
-
+    let cursor = lastVersion;
     let appliedVersion = lastVersion;
-    for (const change of changesResp.changes) {
+    let hasMore = true;
+
+    // Paginated pull: each page is applied before the next is fetched, so
+    // memory stays bounded no matter how far behind this device is.
+    while (hasMore) {
+      const changesResp = await this.client.getChanges(cursor, CHANGES_PAGE_SIZE);
+
+      if (!this.currentSession || changesResp.vaultId !== this.currentSession.vaultId || !Array.isArray(changesResp.changes)) {
+        throw new Error('Invalid changes response');
+      }
+      if (!Number.isSafeInteger(changesResp.latestVersion) || changesResp.latestVersion < cursor) {
+        throw new Error('Invalid changes response version');
+      }
+
+      let previousVersion = cursor;
+      for (const change of changesResp.changes) {
+        if (!Number.isSafeInteger(change.version) || change.version <= cursor || change.version < previousVersion || change.version > changesResp.latestVersion) {
+          throw new Error(`Invalid remote change version: ${change.version}`);
+        }
+        previousVersion = change.version;
+      }
+
+      if (changesResp.changes.length === 0) {
+        await this.db.setMeta('last_synced_version', Math.max(appliedVersion, changesResp.latestVersion));
+        return;
+      }
+
+      for (const change of changesResp.changes) {
       const rawPath = await decryptPath(change.encryptedPath, dataKey);
         const normPath = normalizePath(rawPath);
         const localById = await this.db.getFileById(change.id);
@@ -525,7 +534,11 @@ export class SyncEngine {
 
             const mergeResult = threeWayMerge(baseText, localText, remoteText);
 
-            if (mergeResult.hasConflict && this.settings.conflictStrategy === 'conflict_file') {
+            // A partial merge must never silently overwrite either side.
+            // Whenever the merge reports a conflict, the local version is
+            // preserved in a conflict copy and the remote version wins the
+            // main path, regardless of the configured conflict strategy.
+            if (mergeResult.hasConflict) {
               const deviceName = this.currentSession?.deviceName || 'Device';
               const conflictPath = normalizePath(formatConflictFilename(normPath, deviceName));
               this.watcher.suppress(conflictPath);
@@ -557,6 +570,11 @@ export class SyncEngine {
           });
         }
       appliedVersion = Math.max(appliedVersion, change.version);
+      }
+
+      if (appliedVersion <= cursor) break;
+      cursor = appliedVersion;
+      hasMore = changesResp.hasMore ?? changesResp.changes.length >= CHANGES_PAGE_SIZE;
     }
 
     await this.db.setMeta('last_synced_version', appliedVersion);
@@ -849,6 +867,23 @@ export class SyncEngine {
         if (blob) await this.client.uploadBlob(blob.hash, blob.data);
       }
     }
+    try {
+      return await this.commitOnce(outbox);
+    } catch (error) {
+      // The blob check/upload and the commit are not atomic (upload may have
+      // raced GC or failed silently). Re-upload and retry exactly once before
+      // parking the entry in the outbox for backoff replay.
+      if (error instanceof Error && error.message.includes('blob-missing') && outbox.blobs.length > 0) {
+        for (const blob of outbox.blobs) {
+          await this.client.uploadBlob(blob.hash, blob.data);
+        }
+        return await this.commitOnce(outbox);
+      }
+      throw error;
+    }
+  }
+
+  private async commitOnce(outbox: PendingOutbox): Promise<CommitResult> {
     const result = await this.client.commit(outbox.changes, outbox.requestId);
     if (!result.success || !result.changes || result.changes.length !== outbox.changes.length) {
       throw new Error('Commit response was incomplete');

@@ -1,13 +1,18 @@
 import { requestUrl } from 'obsidian';
 import type {
-  SessionInfoResponse,
-  SyncStatusResponse,
-  ChangesResponse,
   CommitChangeItem,
-  CommitResult,
-  BlobCheckResponse,
-  InitialSyncResponse
+  CommitResult
 } from '@onyx/shared';
+import {
+  assertOkStatus,
+  validateBlobCheck,
+  validateChangesResponse,
+  validateCommitResult,
+  validateInitialSync,
+  validateSessionInfo,
+  validateSyncStatus,
+  validateWsTicket
+} from './validate';
 
 export class SyncApiClient {
   private baseUrl: string;
@@ -44,31 +49,31 @@ export class SyncApiClient {
   }
 
   // Handshake session to get bound vault info, salt, and device name
-  async getSession(): Promise<SessionInfoResponse> {
+  async getSession() {
     const res = await requestUrl({
       url: `${this.baseUrl}/api/v1/session`,
       method: 'GET',
       headers: this.getHeaders()
     });
-    return res.json as SessionInfoResponse;
+    return validateSessionInfo(assertOkStatus(res, 'Session handshake'));
   }
 
-  async getStatus(): Promise<SyncStatusResponse> {
+  async getStatus() {
     const res = await requestUrl({
       url: `${this.baseUrl}/api/v1/sync/status`,
       method: 'GET',
       headers: this.getHeaders()
     });
-    return res.json as SyncStatusResponse;
+    return validateSyncStatus(assertOkStatus(res, 'Sync status'));
   }
 
-  async getChanges(sinceVersion: number): Promise<ChangesResponse> {
+  async getChanges(sinceVersion: number, limit = 200) {
     const res = await requestUrl({
-      url: `${this.baseUrl}/api/v1/sync/changes?since=${sinceVersion}`,
+      url: `${this.baseUrl}/api/v1/sync/changes?since=${sinceVersion}&limit=${limit}`,
       method: 'GET',
       headers: this.getHeaders()
     });
-    return res.json as ChangesResponse;
+    return validateChangesResponse(assertOkStatus(res, 'Fetch changes'));
   }
 
   async commit(changes: CommitChangeItem[], requestId?: string): Promise<CommitResult> {
@@ -78,28 +83,29 @@ export class SyncApiClient {
       headers: this.getHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ requestId, changes })
     });
-    return res.json as CommitResult;
+    return validateCommitResult(assertOkStatus(res, 'Commit'));
   }
 
-  async checkBlobs(hashes: string[]): Promise<BlobCheckResponse> {
+  async checkBlobs(hashes: string[]) {
     const res = await requestUrl({
       url: `${this.baseUrl}/api/v1/sync/blobs/check`,
       method: 'POST',
       headers: this.getHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ hashes })
     });
-    return res.json as BlobCheckResponse;
+    return validateBlobCheck(assertOkStatus(res, 'Check blobs'));
   }
 
   async uploadBlob(hash: string, data: Uint8Array): Promise<void> {
     const slice = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
     const bodyBuffer = slice instanceof ArrayBuffer ? slice : new Uint8Array(data).slice().buffer;
-    await requestUrl({
+    const res = await requestUrl({
       url: `${this.baseUrl}/api/v1/sync/blobs/${hash}`,
       method: 'PUT',
       headers: this.getHeaders({ 'Content-Type': 'application/octet-stream' }),
       body: bodyBuffer
     });
+    assertOkStatus(res, 'Upload blob');
   }
 
   async downloadBlob(hash: string): Promise<Uint8Array> {
@@ -108,6 +114,7 @@ export class SyncApiClient {
       method: 'GET',
       headers: this.getHeaders()
     });
+    assertOkStatus(res, 'Download blob');
     return new Uint8Array(res.arrayBuffer);
   }
 
@@ -119,21 +126,16 @@ export class SyncApiClient {
       method: 'POST',
       headers: this.getHeaders()
     });
-    if (res.status !== 200) {
-      throw new Error(`WebSocket ticket request failed: ${res.status}`);
-    }
-    return res.json as { ticket: string; expiresIn: number };
+    return validateWsTicket(assertOkStatus(res, 'WebSocket ticket request'));
   }
 
-  async startInitialSync(): Promise<InitialSyncResponse> {
+  async startInitialSync() {
     const res = await requestUrl({
       url: `${this.baseUrl}/api/v1/sync/initialization/start`,
       method: 'POST',
       headers: this.getHeaders()
     });
-    if (res.status === 409) throw new Error('Another device is initializing this vault');
-    if (res.status !== 200) throw new Error(`Initial sync start failed: ${res.status}`);
-    return res.json as InitialSyncResponse;
+    return validateInitialSync(assertOkStatus(res, 'Initial sync start'));
   }
 
   async heartbeatInitialSync(): Promise<void> {
@@ -142,7 +144,7 @@ export class SyncApiClient {
       method: 'POST',
       headers: this.getHeaders()
     });
-    if (res.status !== 200) throw new Error(`Initial sync lease lost: ${res.status}`);
+    assertOkStatus(res, 'Initial sync heartbeat');
   }
 
   async completeInitialSync(): Promise<void> {
