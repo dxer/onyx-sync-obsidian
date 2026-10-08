@@ -31,12 +31,21 @@ jobs:
       - name: Compile plugin bundle
         run: npm run build
 
+      - name: Package plugin zip
+        run: |
+          files="main.js manifest.json"
+          [ -f styles.css ] && files="$files styles.css"
+          # shellcheck disable=SC2086
+          zip -j "onyx-sync-${GITHUB_REF_NAME}.zip" $files
+          unzip -l "onyx-sync-${GITHUB_REF_NAME}.zip"
+
       - name: Generate cryptographic artifact attestations
         uses: actions/attest-build-provenance@v2
         with:
           subject-path: |
             main.js
             manifest.json
+            onyx-sync-*.zip
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
@@ -45,3 +54,4 @@ jobs:
           files: |
             main.js
             manifest.json
+            onyx-sync-*.zip
