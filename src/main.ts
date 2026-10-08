@@ -43,8 +43,8 @@ export default class CloudSyncPlugin extends Plugin {
     this.addSettingTab(new CloudSyncSettingTab(this.app, this));
 
     // Initialize Sync Engine
-    this.syncEngine = new SyncEngine(this.app, this.settings, (state: SyncState) => {
-      this.updateStatusBar(state);
+    this.syncEngine = new SyncEngine(this.app, this.settings, (state: SyncState, detail?: string) => {
+      this.updateStatusBar(state, detail);
     });
 
     await this.syncEngine.start();
@@ -110,12 +110,12 @@ export default class CloudSyncPlugin extends Plugin {
     }
   }
 
-  private updateStatusBar(state: SyncState): void {
+  private updateStatusBar(state: SyncState, detail?: string): void {
     if (!this.statusBarEl) return;
 
     switch (state) {
       case 'syncing':
-        this.statusBarEl.setText(t('syncInProgress'));
+        this.statusBarEl.setText(detail || t('syncInProgress'));
         break;
       case 'idle':
         this.statusBarEl.setText(t('syncReady'));

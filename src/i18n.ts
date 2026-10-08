@@ -14,6 +14,9 @@ const en = {
   syncingNotice: 'Synchronizing vault...',
   syncSuccessNotice: 'Sync completed successfully.',
   syncFailedNotice: 'Sync failed: {error}',
+  syncProgress: 'Sync: {done}/{total}',
+  authFailedNotice: 'Device token was rejected (HTTP 401). Please check the Server URL and Device Token.',
+  passphraseHintNotice: 'Sync failed: {error}. If decryption keeps failing, verify the passphrase matches your other devices.',
 
   // Connection & Settings
   settingsTitle: 'Onyx Sync (E2EE)',
@@ -57,6 +60,9 @@ const zh: typeof en = {
   syncingNotice: '正在同步知识库...',
   syncSuccessNotice: '同步已完成。',
   syncFailedNotice: '同步失败: {error}',
+  syncProgress: '同步中 {done}/{total}',
+  authFailedNotice: '设备令牌被拒绝（HTTP 401），请检查服务端地址与设备令牌。',
+  passphraseHintNotice: '同步失败: {error}。若解密持续失败，请确认主密码与其他设备一致。',
 
   // Connection & Settings
   settingsTitle: 'Onyx 同步设置 (端到端加密)',

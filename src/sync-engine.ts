@@ -14,6 +14,7 @@ import {
 import type {
   CommitChangeItem,
   CommitResult,
+  FileChange,
   SyncStatusResponse,
   SessionInfoResponse
 } from '@onyx/shared';
@@ -89,7 +90,7 @@ export class SyncEngine {
   private client: SyncApiClient;
   private db: LocalSyncDb;
   private watcher: VaultWatcher;
-  private onStatusChange: (status: SyncState) => void;
+  private onStatusChange: (status: SyncState, detail?: string) => void;
 
   private isSyncing = false;
   private isInitialized = false;
@@ -110,6 +111,8 @@ export class SyncEngine {
   private inFlightDirty = new Set<string>();
   private inFlightDeletes = new Set<string>();
   private inFlightRenames = new Map<string, string>();
+  /** Last failure message already surfaced via Notice; a success resets the latch. */
+  private lastReportedError: string | null = null;
 
   private get configDir(): string {
     return this.app.vault.configDir;
@@ -118,7 +121,7 @@ export class SyncEngine {
   constructor(
     app: App,
     settings: SyncPluginSettings,
-    onStatusChange: (status: SyncState) => void
+    onStatusChange: (status: SyncState, detail?: string) => void
   ) {
     this.app = app;
     this.settings = { ...settings };
@@ -246,6 +249,20 @@ export class SyncEngine {
     this.hmacKey = subKeys.hmacKey;
   }
 
+  private classifySyncError(message: string): 'auth' | 'busy' | 'decrypt' | 'other' {
+    if (/HTTP 401/.test(message)) return 'auth';
+    if (/initial-sync-in-progress|HTTP 409/.test(message)) return 'busy';
+    if (/decrypt|HMAC mismatch/i.test(message)) return 'decrypt';
+    return 'other';
+  }
+
+  /** Surfaces each distinct failure once; a successful sync resets the latch. */
+  private notifyFailureOnce(message: string, notice: string): void {
+    if (message === this.lastReportedError) return;
+    this.lastReportedError = message;
+    new Notice(notice);
+  }
+
   async sync(options: { fullScan?: boolean; force?: boolean } = {}): Promise<void> {
     if (this.isSyncing) {
       this.wakeRequested = true;
@@ -269,7 +286,13 @@ export class SyncEngine {
       if (!this.currentSession || remoteStatus.vaultId !== this.currentSession.vaultId || remoteStatus.salt !== this.currentSession.salt) {
         throw new Error('Server session and status refer to different vaults');
       }
-    } catch {
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (this.classifySyncError(message) === 'auth') {
+        this.onStatusChange('error');
+        this.notifyFailureOnce(message, t('authFailedNotice'));
+        return;
+      }
       this.onStatusChange('offline');
       return;
     }
@@ -295,7 +318,17 @@ export class SyncEngine {
             });
           }, interval * 1000);
         }
-      } catch {
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        const kind = this.classifySyncError(message);
+        // Another device is bootstrapping an empty vault: back off quietly
+        // this round instead of alarming the user.
+        if (kind === 'busy') return;
+        if (kind === 'auth') {
+          this.onStatusChange('error');
+          this.notifyFailureOnce(message, t('authFailedNotice'));
+          return;
+        }
         this.onStatusChange('offline');
         return;
       }
@@ -340,6 +373,7 @@ export class SyncEngine {
 
       this.isInitialized = true;
       this.onStatusChange('idle');
+      this.lastReportedError = null;
 
       if (options.force) {
         new Notice(t('syncSuccessNotice'));
@@ -357,7 +391,14 @@ export class SyncEngine {
       console.error('[Obsidian Cloud Sync] Sync failed:', err);
       this.onStatusChange('error');
       const errorMsg = err instanceof Error ? err.message : String(err);
-      new Notice(t('syncFailedNotice', { error: errorMsg }));
+      const kind = this.classifySyncError(errorMsg);
+      if (kind === 'auth') {
+        this.notifyFailureOnce(errorMsg, t('authFailedNotice'));
+      } else if (kind === 'decrypt') {
+        this.notifyFailureOnce(errorMsg, t('passphraseHintNotice', { error: errorMsg }));
+      } else {
+        this.notifyFailureOnce(errorMsg, t('syncFailedNotice', { error: errorMsg }));
+      }
     } finally {
       this.isSyncing = false;
       if (this.wakeRequested) {
@@ -414,6 +455,7 @@ export class SyncEngine {
     const dataKey = this.dataKey!;
     let cursor = lastVersion;
     let appliedVersion = lastVersion;
+    let latestSeen = lastVersion;
     let hasMore = true;
 
     // Paginated pull: each page is applied before the next is fetched, so
@@ -440,8 +482,16 @@ export class SyncEngine {
         await this.db.setMeta('last_synced_version', Math.max(appliedVersion, changesResp.latestVersion));
         return;
       }
+      latestSeen = Math.max(latestSeen, changesResp.latestVersion);
 
-      for (const change of changesResp.changes) {
+      // Phase 1: download + decrypt + verify every blob concurrently (bounded
+      // by the file concurrency setting). Pure network/CPU work — no vault or
+      // database mutation happens here, so a failure discards the whole page
+      // and the previously checkpointed cursor stays valid for resume.
+      const fetchedBlobs = await this.fetchPageBlobs(changesResp.changes, dataKey);
+
+      // Phase 2: apply sequentially. Vault writes must stay ordered.
+      for (const [changeIndex, change] of changesResp.changes.entries()) {
       const rawPath = await decryptPath(change.encryptedPath, dataKey);
         const normPath = normalizePath(rawPath);
         const localById = await this.db.getFileById(change.id);
@@ -473,16 +523,12 @@ export class SyncEngine {
           }
           await this.db.deleteFile(deletePath);
           await this.db.deleteSnapshot(deletePath);
+          appliedVersion = Math.max(appliedVersion, change.version);
           continue;
         }
 
-        // Handle Remote Create / Update
-        const encryptedBlob = await this.client.downloadBlob(change.contentHash);
-        const plainBytes = await decryptData(encryptedBlob, dataKey);
-        const actualHash = await calculateContentHmac(plainBytes, this.hmacKey!);
-        if (actualHash !== change.contentHash) {
-          throw new Error(`Remote blob HMAC mismatch for ${change.id}`);
-        }
+        // Handle Remote Create / Update (blob fetched + verified in phase 1)
+        const plainBytes = fetchedBlobs[changeIndex]!;
 
         const existsLocally = await this.app.vault.adapter.exists(normPath);
 
@@ -523,6 +569,7 @@ export class SyncEngine {
               isDeleted: false,
               syncedVersion: change.version
             });
+            appliedVersion = Math.max(appliedVersion, change.version);
             continue;
           }
 
@@ -537,7 +584,7 @@ export class SyncEngine {
             // A partial merge must never silently overwrite either side.
             // Whenever the merge reports a conflict, the local version is
             // preserved in a conflict copy and the remote version wins the
-            // main path, regardless of the configured conflict strategy.
+            // main path.
             if (mergeResult.hasConflict) {
               const deviceName = this.currentSession?.deviceName || 'Device';
               const conflictPath = normalizePath(formatConflictFilename(normPath, deviceName));
@@ -574,10 +621,61 @@ export class SyncEngine {
 
       if (appliedVersion <= cursor) break;
       cursor = appliedVersion;
+      // Checkpoint every page so an interrupted pull resumes instead of restarting.
+      await this.db.setMeta('last_synced_version', cursor);
+      this.reportPullProgress(cursor, lastVersion, latestSeen);
       hasMore = changesResp.hasMore ?? changesResp.changes.length >= CHANGES_PAGE_SIZE;
     }
 
     await this.db.setMeta('last_synced_version', appliedVersion);
+  }
+
+  private reportPullProgress(cursor: number, startVersion: number, latestVersion: number): void {
+    const total = Math.max(0, latestVersion - startVersion);
+    const done = Math.max(0, Math.min(cursor - startVersion, total));
+    this.onStatusChange('syncing', t('syncProgress', { done, total }));
+  }
+
+  /**
+   * Downloads, decrypts and HMAC-verifies one page of blobs with bounded
+   * concurrency. Returns plaintext per change in page order (null for
+   * tombstones, which carry no blob). Throws on the first failure, leaving
+   * the persisted cursor untouched so the page is retried wholesale.
+   */
+  private async fetchPageBlobs(changes: FileChange[], dataKey: CryptoKey): Promise<Array<Uint8Array | null>> {
+    const hmacKey = this.hmacKey!;
+    const results = new Array<Uint8Array | null>(changes.length);
+    let nextIndex = 0;
+    let firstError: unknown = null;
+
+    const worker = async (): Promise<void> => {
+      while (firstError === null) {
+        const index = nextIndex++;
+        if (index >= changes.length) return;
+        const change = changes[index];
+        if (change.isDeleted) {
+          results[index] = null;
+          continue;
+        }
+        try {
+          const encryptedBlob = await this.client.downloadBlob(change.contentHash);
+          const plainBytes = await decryptData(encryptedBlob, dataKey);
+          const actualHash = await calculateContentHmac(plainBytes, hmacKey);
+          if (actualHash !== change.contentHash) {
+            throw new Error(`Remote blob HMAC mismatch for ${change.id}`);
+          }
+          results[index] = plainBytes;
+        } catch (error) {
+          firstError = error;
+          return;
+        }
+      }
+    };
+
+    const workerCount = Math.max(1, Math.min(8, Math.floor(this.settings.syncConcurrency || 1)));
+    await Promise.all(Array.from({ length: Math.min(workerCount, changes.length) }, () => worker()));
+    if (firstError) throw firstError;
+    return results;
   }
 
   private async scanAndPush(fullScan: boolean): Promise<void> {
@@ -632,6 +730,7 @@ export class SyncEngine {
     }
 
     let nextTask = 0;
+    let completedTasks = 0;
     let firstError: unknown = null;
     const workerCount = Math.max(1, Math.min(8, Math.floor(this.settings.syncConcurrency || 1)));
     const worker = async (): Promise<void> => {
@@ -640,6 +739,8 @@ export class SyncEngine {
         if (!task) return;
         try {
           await this.processSyncTask(task, claimedRenames);
+          completedTasks += 1;
+          this.onStatusChange('syncing', t('syncProgress', { done: completedTasks, total: tasks.length }));
         } catch (error) {
           firstError = error;
           return;
