@@ -66,7 +66,7 @@ export function validateSessionInfo(value: unknown): SessionInfoResponse {
   ) {
     throw new Error('Invalid session response from server');
   }
-  return value as SessionInfoResponse;
+  return value as unknown as SessionInfoResponse;
 }
 
 export function validateSyncStatus(value: unknown): SyncStatusResponse {
@@ -80,7 +80,7 @@ export function validateSyncStatus(value: unknown): SyncStatusResponse {
   ) {
     throw new Error('Invalid sync status response from server');
   }
-  return value as SyncStatusResponse;
+  return value as unknown as SyncStatusResponse;
 }
 
 function validateFileChange(value: unknown): FileChange {
@@ -97,7 +97,7 @@ function validateFileChange(value: unknown): FileChange {
   ) {
     throw new Error('Invalid file change in server response');
   }
-  return value as FileChange;
+  return value as unknown as FileChange;
 }
 
 export function validateChangesResponse(value: unknown): ChangesResponse {
@@ -110,13 +110,13 @@ export function validateChangesResponse(value: unknown): ChangesResponse {
     throw new Error('Invalid changes response from server');
   }
   const changes = (value.changes as unknown[]).map(validateFileChange);
-  // Older servers predate pagination and omit hasMore; treat a full page as
-  // "maybe more" so the pull loop below keeps converging via extra rounds.
+  // Older servers predate pagination and omit hasMore. Preserve the absence
+  // so callers can fall back to "a full page means maybe more".
   const hasMore = value.hasMore === undefined ? undefined : value.hasMore;
   if (hasMore !== undefined && !isBoolean(hasMore)) {
     throw new Error('Invalid changes pagination flag from server');
   }
-  return { vaultId: value.vaultId, latestVersion: value.latestVersion, changes, hasMore: hasMore ?? false };
+  return { vaultId: value.vaultId, latestVersion: value.latestVersion, changes, hasMore };
 }
 
 export function validateCommitResult(value: unknown): CommitResult {
@@ -136,7 +136,7 @@ export function validateCommitResult(value: unknown): CommitResult {
       }
     }
   }
-  return value as CommitResult;
+  return value as unknown as CommitResult;
 }
 
 export function validateBlobCheck(value: unknown): BlobCheckResponse {
@@ -147,7 +147,7 @@ export function validateBlobCheck(value: unknown): BlobCheckResponse {
   ) {
     throw new Error('Invalid blob check response from server');
   }
-  return value as BlobCheckResponse;
+  return value as unknown as BlobCheckResponse;
 }
 
 export function validateInitialSync(value: unknown): InitialSyncResponse {
@@ -158,7 +158,7 @@ export function validateInitialSync(value: unknown): InitialSyncResponse {
   ) {
     throw new Error('Invalid initial sync response from server');
   }
-  return value as InitialSyncResponse;
+  return value as unknown as InitialSyncResponse;
 }
 
 export function validateWsTicket(value: unknown): { ticket: string; expiresIn: number } {
