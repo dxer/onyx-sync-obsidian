@@ -5,7 +5,8 @@ import type {
   ChangesResponse,
   CommitChangeItem,
   CommitResult,
-  BlobCheckResponse
+  BlobCheckResponse,
+  InitialSyncResponse
 } from '@onyx/shared';
 
 export class SyncApiClient {
@@ -122,5 +123,33 @@ export class SyncApiClient {
       throw new Error(`WebSocket ticket request failed: ${res.status}`);
     }
     return res.json as { ticket: string; expiresIn: number };
+  }
+
+  async startInitialSync(): Promise<InitialSyncResponse> {
+    const res = await requestUrl({
+      url: `${this.baseUrl}/api/v1/sync/initialization/start`,
+      method: 'POST',
+      headers: this.getHeaders()
+    });
+    if (res.status === 409) throw new Error('Another device is initializing this vault');
+    if (res.status !== 200) throw new Error(`Initial sync start failed: ${res.status}`);
+    return res.json as InitialSyncResponse;
+  }
+
+  async heartbeatInitialSync(): Promise<void> {
+    const res = await requestUrl({
+      url: `${this.baseUrl}/api/v1/sync/initialization/heartbeat`,
+      method: 'POST',
+      headers: this.getHeaders()
+    });
+    if (res.status !== 200) throw new Error(`Initial sync lease lost: ${res.status}`);
+  }
+
+  async completeInitialSync(): Promise<void> {
+    await requestUrl({
+      url: `${this.baseUrl}/api/v1/sync/initialization/complete`,
+      method: 'POST',
+      headers: this.getHeaders()
+    });
   }
 }

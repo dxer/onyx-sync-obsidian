@@ -36,6 +36,8 @@ const en = {
   autoSyncDesc: 'Synchronize on file modification, window focus, and background interval',
   syncIntervalName: 'Background Sync Interval (seconds)',
   syncIntervalDesc: 'How often to poll the server when no changes are detected (0 disables interval sync)',
+  syncConcurrencyName: 'File Sync Concurrency',
+  syncConcurrencyDesc: 'Number of complete files processed at once. Files are not split into chunks (1–8).',
 
   // Actions
   actionsHeader: 'Connection & Operations',
@@ -81,6 +83,8 @@ const zh: typeof en = {
   autoSyncDesc: '笔记保存、窗口聚焦及定时在后台自动执行静默增量同步',
   syncIntervalName: '后台同步间隔 (秒)',
   syncIntervalDesc: '无变更时轮询服务端的间隔（设为 0 关闭定时轮询，仅保留事件触发同步）',
+  syncConcurrencyName: '文件同步并行数',
+  syncConcurrencyDesc: '同时处理的完整文件数量，不会拆分文件（1–8）。',
 
   // Actions
   actionsHeader: '连接与操作',

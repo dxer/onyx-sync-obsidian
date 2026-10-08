@@ -141,6 +141,21 @@ export class CloudSyncSettingTab extends PluginSettingTab {
         });
       });
 
+    // 8. File Sync Concurrency
+    new Setting(containerEl)
+      .setName(t('syncConcurrencyName'))
+      .setDesc(t('syncConcurrencyDesc'))
+      .addText((text) => {
+        text.inputEl.type = 'number';
+        text.setPlaceholder('3').setValue(String(this.plugin.settings.syncConcurrency));
+        text.onChange((value) => {
+          const concurrency = Number(value);
+          if (!Number.isFinite(concurrency) || concurrency < 1) return;
+          this.plugin.settings.syncConcurrency = Math.min(8, Math.floor(concurrency));
+          this.scheduleSettingsSave();
+        });
+      });
+
     // Actions Header
     new Setting(containerEl).setName(t('actionsHeader')).setHeading();
 

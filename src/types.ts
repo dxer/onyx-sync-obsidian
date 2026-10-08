@@ -4,6 +4,8 @@ export interface SyncPluginSettings {
   passphrase: string; // Master password for end-to-end encryption
   autoSync: boolean;
   syncInterval: number; // in seconds
+  /** Number of complete files processed concurrently (not chunking). */
+  syncConcurrency: number;
   conflictStrategy: 'merge' | 'conflict_file';
 
   // Cached metadata received automatically from session handshake
@@ -18,6 +20,7 @@ export const DEFAULT_SETTINGS: SyncPluginSettings = {
   passphrase: '',
   autoSync: true,
   syncInterval: 5,
+  syncConcurrency: 3,
   conflictStrategy: 'merge'
 };
 

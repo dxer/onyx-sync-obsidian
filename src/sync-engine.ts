@@ -101,6 +101,9 @@ export class SyncEngine {
   private localVaultKey: string;
   private activeVaultId: string | null = null;
   private wakeRequested = false;
+  private commitAckChain: Promise<void> = Promise.resolve();
+  private initialSyncOwned = false;
+  private initialSyncHeartbeat: number | null = null;
   private inFlightDirty = new Set<string>();
   private inFlightDeletes = new Set<string>();
   private inFlightRenames = new Map<string, string>();
@@ -160,6 +163,14 @@ export class SyncEngine {
     window.removeEventListener('focus', this.handleWindowFocus);
     this.watcher.stop();
     this.stopPolling();
+    if (this.initialSyncHeartbeat !== null) {
+      window.clearInterval(this.initialSyncHeartbeat);
+      this.initialSyncHeartbeat = null;
+    }
+    if (this.initialSyncOwned) {
+      void this.client.completeInitialSync().catch(() => undefined);
+      this.initialSyncOwned = false;
+    }
     this.disconnectWebSocket();
     this.db.close();
   }
@@ -265,13 +276,35 @@ export class SyncEngine {
     const localUserFiles = this.app.vault.getFiles().filter(
       (f) => !f.path.startsWith(this.configDir) && !f.path.startsWith('.trash')
     );
+    if (remoteStatus.latestVersion === 0 && localUserFiles.length > 0 && !this.initialSyncOwned) {
+      try {
+        const lock = await this.client.startInitialSync();
+        if (lock.status === 'acquired') {
+          this.initialSyncOwned = true;
+          const interval = Math.max(30, Math.floor((lock.leaseSeconds || 600) / 2));
+          this.initialSyncHeartbeat = window.setInterval(() => {
+            void this.client.heartbeatInitialSync().catch(() => {
+              this.initialSyncOwned = false;
+              if (this.initialSyncHeartbeat !== null) {
+                window.clearInterval(this.initialSyncHeartbeat);
+                this.initialSyncHeartbeat = null;
+              }
+            });
+          }, interval * 1000);
+        }
+      } catch {
+        this.onStatusChange('offline');
+        return;
+      }
+    }
     if (localUserFiles.length === 0 && remoteStatus.latestVersion > 0) {
       lastVersion = 0;
     }
 
     const hasRemoteChanges = remoteStatus.latestVersion > lastVersion;
     const hasLocalChanges = this.dirtyPaths.size > 0 || this.pendingDeletes.size > 0 || this.pendingRenames.size > 0;
-    const needsFullScan = options.fullScan || !this.isInitialized;
+    const remoteOnlyInitialSync = localUserFiles.length === 0 && remoteStatus.latestVersion > 0 && lastVersion === 0 && !hasLocalChanges;
+    const needsFullScan = !remoteOnlyInitialSync && (options.fullScan || !this.isInitialized);
 
     if (!hasRemoteChanges && !hasLocalChanges && !needsFullScan && !options.force) {
       return;
@@ -293,6 +326,15 @@ export class SyncEngine {
       // 2. PUSH PHASE
       await this.scanAndPush(needsFullScan);
 
+      if (this.initialSyncOwned) {
+        await this.client.completeInitialSync();
+        this.initialSyncOwned = false;
+        if (this.initialSyncHeartbeat !== null) {
+          window.clearInterval(this.initialSyncHeartbeat);
+          this.initialSyncHeartbeat = null;
+        }
+      }
+
       this.isInitialized = true;
       this.onStatusChange('idle');
 
@@ -301,6 +343,14 @@ export class SyncEngine {
       }
     } catch (err: unknown) {
       this.restoreInFlightEvents();
+      if (this.initialSyncOwned) {
+        this.initialSyncOwned = false;
+        if (this.initialSyncHeartbeat !== null) {
+          window.clearInterval(this.initialSyncHeartbeat);
+          this.initialSyncHeartbeat = null;
+        }
+        void this.client.completeInitialSync().catch(() => undefined);
+      }
       console.error('[Obsidian Cloud Sync] Sync failed:', err);
       this.onStatusChange('error');
       const errorMsg = err instanceof Error ? err.message : String(err);
@@ -370,7 +420,7 @@ export class SyncEngine {
 
     let previousVersion = lastVersion;
     for (const change of changesResp.changes) {
-      if (!Number.isSafeInteger(change.version) || change.version <= lastVersion || change.version <= previousVersion || change.version > changesResp.latestVersion) {
+      if (!Number.isSafeInteger(change.version) || change.version <= lastVersion || change.version < previousVersion || change.version > changesResp.latestVersion) {
         throw new Error(`Invalid remote change version: ${change.version}`);
       }
       previousVersion = change.version;
@@ -513,9 +563,6 @@ export class SyncEngine {
   }
 
   private async scanAndPush(fullScan: boolean): Promise<void> {
-    const dataKey = this.dataKey!;
-    const hmacKey = this.hmacKey!;
-
     const pathsToCheck = new Set<string>();
 
     const claimedDirty = new Set(this.dirtyPaths);
@@ -538,97 +585,144 @@ export class SyncEngine {
       }
     }
 
-    const changesToCommit: CommitChangeItem[] = [];
-    const blobsToUpload = new Map<string, Uint8Array>();
+    type SyncTask = { kind: 'delete' | 'file'; path: string };
+    const tasks: SyncTask[] = [];
 
-    // 1. Process explicit deletes
+    // Build a lightweight task list first. File contents are read only by a
+    // worker, so a large vault does not occupy memory all at once.
     for (const deletedPath of claimedDeletes) {
       const existing = await this.db.getFile(deletedPath);
       if (existing && !existing.isDeleted) {
-        const encryptedPath = await encryptPath(deletedPath, dataKey);
-        changesToCommit.push({
-          id: existing.id,
-          encryptedPath,
-          contentHash: '',
-          size: 0,
-          isDeleted: true,
-          mtime: Date.now()
-        });
+        tasks.push({ kind: 'delete', path: deletedPath });
+      } else {
+        this.inFlightDeletes.delete(deletedPath);
       }
     }
-    // 2. Process modified/created files
+
     for (const path of pathsToCheck) {
       if (path.startsWith(this.configDir) || path.startsWith('.trash') || path.startsWith('.git')) {
         continue;
       }
-
-      const file = this.app.vault.getAbstractFileByPath(path) as TFile | null;
-      if (!file) {
-        continue;
-      }
-
-      const binary = await this.app.vault.adapter.readBinary(path);
-      const bytes = new Uint8Array(binary);
-      const currentHash = await calculateContentHmac(bytes, hmacKey);
-
-      const existingRecord = await this.db.getFile(path);
-      const renameSource = Array.from(claimedRenames.entries()).find(([, renamedPath]) => renamedPath === path)?.[0];
-      const renameRecord = renameSource ? await this.db.getFile(renameSource) : null;
-      const isRename = Boolean(renameRecord);
-      const contentChanged = !existingRecord || existingRecord.localHash !== currentHash;
-
-      if (contentChanged || isRename) {
-        const encryptedPath = await encryptPath(path, dataKey);
-        let encryptedBlob: Uint8Array | null = null;
-
-        if (contentChanged) {
-          encryptedBlob = await encryptData(bytes, dataKey);
-          // The server is zero-knowledge (contentHash is a client-side HMAC over
-          // plaintext), so verify locally that the ciphertext round-trips to the
-          // claimed hash before it leaves the device.
-          const roundtrip = await decryptData(encryptedBlob, dataKey);
-          const roundtripHash = await calculateContentHmac(roundtrip, hmacKey);
-          if (roundtripHash !== currentHash) {
-            throw new Error(`Local encryption roundtrip failed for ${path}`);
-          }
-          blobsToUpload.set(currentHash, encryptedBlob);
-        }
-
-        changesToCommit.push({
-          id: existingRecord?.id || renameRecord?.id,
-          encryptedPath,
-          contentHash: currentHash,
-          size: encryptedBlob?.byteLength || existingRecord?.size || renameRecord?.size || 0,
-          isDeleted: false,
-          mtime: file.stat.mtime
-        });
-      }
+      if (this.app.vault.getAbstractFileByPath(path)) tasks.push({ kind: 'file', path });
     }
 
-    if (changesToCommit.length === 0) {
-      this.restoreClaimedEvents(claimedDirty, claimedDeletes, claimedRenames);
+    if (tasks.length === 0) {
+      this.inFlightDirty.clear();
+      this.inFlightDeletes.clear();
+      this.inFlightRenames.clear();
       return;
     }
 
-    // Persist the complete operation before any network side effect. From this
-    // point on the claimed watcher events are durably captured by the outbox,
-    // so they must never be restored into the pending sets on failure.
-    const winObj = typeof window !== 'undefined' ? (window as unknown as { activeWindow?: Window; crypto?: Crypto }) : null;
-    const cryptoInstance = winObj?.activeWindow?.crypto || winObj?.crypto || window.crypto;
-    const requestId = cryptoInstance.randomUUID();
-    const outbox: PendingOutbox = {
-      requestId,
-      changes: changesToCommit,
-      blobs: Array.from(blobsToUpload.entries()).map(([hash, data]) => ({ hash, data })),
-      renames: Array.from(claimedRenames.entries()).map(([oldPath, newPath]) => ({ oldPath, newPath })),
-      createdAt: Date.now(),
-      attempts: 0
+    let nextTask = 0;
+    let firstError: unknown = null;
+    const workerCount = Math.max(1, Math.min(8, Math.floor(this.settings.syncConcurrency || 1)));
+    const worker = async (): Promise<void> => {
+      while (!firstError) {
+        const task = tasks[nextTask++];
+        if (!task) return;
+        try {
+          await this.processSyncTask(task, claimedRenames);
+        } catch (error) {
+          firstError = error;
+          return;
+        }
+      }
     };
-    await this.db.putOutbox(outbox);
+
+    await Promise.all(Array.from({ length: Math.min(workerCount, tasks.length) }, () => worker()));
+    if (firstError) throw firstError;
     this.inFlightDirty.clear();
     this.inFlightDeletes.clear();
     this.inFlightRenames.clear();
+  }
 
+  private async processSyncTask(
+    task: { kind: 'delete' | 'file'; path: string },
+    claimedRenames: Map<string, string>
+  ): Promise<void> {
+    const dataKey = this.dataKey!;
+    const hmacKey = this.hmacKey!;
+    const path = normalizePath(task.path);
+    const renameSource = Array.from(claimedRenames.entries()).find(([, newPath]) => normalizePath(newPath) === path)?.[0];
+    const renameRecord = renameSource ? await this.db.getFile(renameSource) : null;
+
+    if (task.kind === 'delete') {
+      const existing = await this.db.getFile(path);
+      if (!existing || existing.isDeleted) {
+        this.inFlightDeletes.delete(task.path);
+        return;
+      }
+      const change: CommitChangeItem = {
+        id: existing.id,
+        encryptedPath: await encryptPath(path, dataKey),
+        contentHash: '',
+        size: 0,
+        isDeleted: true,
+        mtime: Date.now()
+      };
+      await this.persistAndRunTask({
+        requestId: crypto.randomUUID(),
+        changes: [change],
+        blobs: [],
+        renames: [],
+        createdAt: Date.now(),
+        attempts: 0
+      }, () => this.inFlightDeletes.delete(task.path));
+      this.inFlightDeletes.delete(task.path);
+      return;
+    }
+
+    const file = this.app.vault.getAbstractFileByPath(path) as TFile | null;
+    if (!file) {
+      this.inFlightDirty.delete(task.path);
+      return;
+    }
+    const bytes = new Uint8Array(await this.app.vault.adapter.readBinary(path));
+    const currentHash = await calculateContentHmac(bytes, hmacKey);
+    const existingRecord = await this.db.getFile(path);
+    const contentChanged = !existingRecord || existingRecord.localHash !== currentHash;
+    const isRename = Boolean(renameRecord);
+
+    if (!contentChanged && !isRename) {
+      this.inFlightDirty.delete(task.path);
+      return;
+    }
+
+    const encryptedPath = await encryptPath(path, dataKey);
+    let encryptedBlob: Uint8Array | null = null;
+    if (contentChanged) {
+      encryptedBlob = await encryptData(bytes, dataKey);
+      const roundtrip = await decryptData(encryptedBlob, dataKey);
+      const roundtripHash = await calculateContentHmac(roundtrip, hmacKey);
+      if (roundtripHash !== currentHash) throw new Error(`Local encryption roundtrip failed for ${path}`);
+    }
+
+    await this.persistAndRunTask({
+      requestId: crypto.randomUUID(),
+      changes: [{
+        id: existingRecord?.id || renameRecord?.id,
+        encryptedPath,
+        contentHash: currentHash,
+        size: encryptedBlob?.byteLength || existingRecord?.size || renameRecord?.size || 0,
+        isDeleted: false,
+        mtime: file.stat.mtime
+      }],
+      blobs: encryptedBlob ? [{ hash: currentHash, data: encryptedBlob }] : [],
+      renames: renameSource ? [{ oldPath: renameSource, newPath: path }] : [],
+      createdAt: Date.now(),
+      attempts: 0
+    }, () => {
+      this.inFlightDirty.delete(task.path);
+      if (renameSource) this.inFlightRenames.delete(renameSource);
+    });
+    this.inFlightDirty.delete(task.path);
+    if (renameSource) this.inFlightRenames.delete(renameSource);
+  }
+
+  private async persistAndRunTask(outbox: PendingOutbox, onPersist: () => void): Promise<void> {
+    // Persist before network I/O. Once persisted, replayOutbox owns recovery.
+    await this.db.putOutbox(outbox);
+    onPersist();
     await this.runOutbox(outbox);
   }
 
@@ -640,11 +734,25 @@ export class SyncEngine {
   private async runOutbox(outbox: PendingOutbox): Promise<void> {
     try {
       const commitResult = await this.commitOutbox(outbox);
-      await this.applyCommitAck(outbox, commitResult);
+      await this.applyCommitAckInOrder(outbox, commitResult);
       await this.db.deleteOutbox(outbox.requestId);
     } catch (error) {
       await this.markOutboxFailure(outbox, error);
       throw error;
+    }
+  }
+
+  private async applyCommitAckInOrder(outbox: PendingOutbox, commitResult: CommitResult): Promise<void> {
+    const previous = this.commitAckChain;
+    let release!: () => void;
+    this.commitAckChain = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      await this.applyCommitAck(outbox, commitResult);
+    } finally {
+      release();
     }
   }
 
@@ -666,7 +774,6 @@ export class SyncEngine {
   /** Applies an acknowledged commit to the local database (files, snapshots, rename bookkeeping, version). */
   private async applyCommitAck(outbox: PendingOutbox, commitResult: CommitResult): Promise<void> {
     const dataKey = this.dataKey!;
-    await this.db.setMeta('last_synced_version', commitResult.newVersion);
 
     for (const [index, item] of outbox.changes.entries()) {
       const plainPath = normalizePath(await decryptPath(item.encryptedPath, dataKey));
@@ -674,13 +781,21 @@ export class SyncEngine {
       const fileId = committed?.id || item.id;
 
       if (item.isDeleted) {
-        await this.db.deleteFile(plainPath);
-        await this.db.deleteSnapshot(plainPath);
+        // A new file may have been created at the same path while the delete
+        // was in flight. Leave its watcher event and local record intact.
+        if (!(await this.app.vault.adapter.exists(plainPath))) {
+          await this.db.deleteFile(plainPath);
+          await this.db.deleteSnapshot(plainPath);
+        }
       } else {
         const file = this.app.vault.getAbstractFileByPath(plainPath) as TFile | null;
         if (file) {
           const binary = await this.app.vault.adapter.readBinary(plainPath);
           const bytes = new Uint8Array(binary);
+          const currentHash = await calculateContentHmac(bytes, this.hmacKey!);
+          // The file changed while this task was uploading. Keep the newer
+          // watcher event queued instead of recording the old hash as current.
+          if (currentHash !== item.contentHash) continue;
 
           if (isTextFile(plainPath)) {
             const text = textDecoder.decode(bytes);
@@ -711,6 +826,10 @@ export class SyncEngine {
         await this.migrateSnapshot(oldPath, newPath);
       }
     }
+
+    // Do not advance the pull cursor from a local commit. Another device may
+    // have committed a lower version concurrently; the next sync must pull
+    // from the last server cursor rather than skip that remote change.
   }
 
   private async migrateSnapshot(oldPath: string, newPath: string): Promise<void> {

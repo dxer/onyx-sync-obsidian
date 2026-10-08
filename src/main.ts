@@ -68,7 +68,10 @@ export default class CloudSyncPlugin extends Plugin {
 
     this.settings = Object.assign({}, DEFAULT_SETTINGS, rawData, {
       deviceToken: decryptedToken,
-      passphrase: decryptedPass
+      passphrase: decryptedPass,
+      syncConcurrency: Number.isFinite(rawData.syncConcurrency)
+        ? Math.max(1, Math.min(8, Math.floor(rawData.syncConcurrency as number)))
+        : DEFAULT_SETTINGS.syncConcurrency
     });
 
     // If legacy plaintext existed on disk, auto-encrypt and re-save
@@ -88,6 +91,7 @@ export default class CloudSyncPlugin extends Plugin {
       encPassphrase: encPass,
       autoSync: this.settings.autoSync,
       syncInterval: this.settings.syncInterval,
+      syncConcurrency: this.settings.syncConcurrency,
       conflictStrategy: this.settings.conflictStrategy,
       cachedVaultId: this.settings.cachedVaultId,
       cachedVaultName: this.settings.cachedVaultName,
