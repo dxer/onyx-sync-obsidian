@@ -45,7 +45,8 @@ const OUTBOX_BACKOFF_BASE_MS = 30_000;
 const OUTBOX_BACKOFF_MAX_MS = 15 * 60_000;
 
 function outboxBackoffMs(attempts: number): number {
-  return Math.min(OUTBOX_BACKOFF_BASE_MS * 2 ** Math.max(0, attempts - 1), OUTBOX_BACKOFF_MAX_MS);
+  const base = Math.min(OUTBOX_BACKOFF_BASE_MS * 2 ** Math.max(0, attempts - 1), OUTBOX_BACKOFF_MAX_MS);
+  return Math.round(base * (0.8 + Math.random() * 0.4));
 }
 
 interface ExtendedApp extends App {
@@ -113,6 +114,8 @@ export class SyncEngine {
   private inFlightRenames = new Map<string, string>();
   /** Last failure message already surfaced via Notice; a success resets the latch. */
   private lastReportedError: string | null = null;
+  private recentlyPulled = new Map<string, { hash: string; at: number }>();
+  private initialSyncLeaseLost = false;
 
   private get configDir(): string {
     return this.app.vault.configDir;
@@ -197,6 +200,12 @@ export class SyncEngine {
       this.currentSession = null;
       this.activeVaultId = null;
       this.isInitialized = false;
+      this.dirtyPaths.clear();
+      this.pendingDeletes.clear();
+      this.pendingRenames.clear();
+      this.inFlightDirty.clear();
+      this.inFlightDeletes.clear();
+      this.inFlightRenames.clear();
       this.db.close();
       this.db = new LocalSyncDb(nextSettings.cachedVaultId || 'default', this.localVaultKey);
       await this.db.init();
@@ -250,7 +259,7 @@ export class SyncEngine {
   }
 
   private classifySyncError(message: string): 'auth' | 'busy' | 'decrypt' | 'other' {
-    if (/HTTP 401/.test(message)) return 'auth';
+    if (/HTTP 40[13]/.test(message)) return 'auth';
     if (/initial-sync-in-progress|HTTP 409/.test(message)) return 'busy';
     if (/decrypt|HMAC mismatch/i.test(message)) return 'decrypt';
     return 'other';
@@ -275,7 +284,13 @@ export class SyncEngine {
 
     try {
       await this.ensureCryptoKeys();
-    } catch {
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (this.classifySyncError(message) === 'auth') {
+        this.onStatusChange('error');
+        this.notifyFailureOnce(message, t('authFailedNotice'));
+        return;
+      }
       this.onStatusChange('offline');
       return;
     }
@@ -307,10 +322,12 @@ export class SyncEngine {
         const lock = await this.client.startInitialSync();
         if (lock.status === 'acquired') {
           this.initialSyncOwned = true;
+          this.initialSyncLeaseLost = false;
           const interval = Math.max(30, Math.floor((lock.leaseSeconds || 600) / 2));
           this.initialSyncHeartbeat = window.setInterval(() => {
             void this.client.heartbeatInitialSync().catch(() => {
               this.initialSyncOwned = false;
+              this.initialSyncLeaseLost = true;
               if (this.initialSyncHeartbeat !== null) {
                 window.clearInterval(this.initialSyncHeartbeat);
                 this.initialSyncHeartbeat = null;
@@ -359,12 +376,18 @@ export class SyncEngine {
         await this.pullAndMerge(lastVersion);
       }
 
+      if (this.initialSyncLeaseLost) {
+        this.initialSyncLeaseLost = false;
+        throw new Error('Initial sync lease lost, retrying');
+      }
+
       // 2. PUSH PHASE
       await this.scanAndPush(needsFullScan);
 
       if (this.initialSyncOwned) {
         await this.client.completeInitialSync();
         this.initialSyncOwned = false;
+        this.initialSyncLeaseLost = false;
         if (this.initialSyncHeartbeat !== null) {
           window.clearInterval(this.initialSyncHeartbeat);
           this.initialSyncHeartbeat = null;
@@ -451,6 +474,26 @@ export class SyncEngine {
     }
   }
 
+  private assertRemotePathInVault(rawPath: string, normPath: string): void {
+    if (!rawPath || rawPath.startsWith('/') || rawPath.split('/').includes('..') || !normPath) {
+      throw new Error('Remote path escapes vault');
+    }
+    if (normPath.startsWith(this.configDir) || normPath.startsWith('.trash') || normPath.startsWith('.git')) {
+      throw new Error('Remote path escapes vault');
+    }
+  }
+
+  private recordPulled(path: string, hash: string): void {
+    const norm = normalizePath(path);
+    this.recentlyPulled.delete(norm);
+    while (this.recentlyPulled.size >= 2000) {
+      const oldest = this.recentlyPulled.keys().next();
+      if (oldest.done) break;
+      this.recentlyPulled.delete(oldest.value);
+    }
+    this.recentlyPulled.set(norm, { hash, at: Date.now() });
+  }
+
   private async pullAndMerge(lastVersion: number): Promise<void> {
     const dataKey = this.dataKey!;
     let cursor = lastVersion;
@@ -494,10 +537,14 @@ export class SyncEngine {
       for (const [changeIndex, change] of changesResp.changes.entries()) {
       const rawPath = await decryptPath(change.encryptedPath, dataKey);
         const normPath = normalizePath(rawPath);
+        this.assertRemotePathInVault(rawPath, normPath);
         const localById = await this.db.getFileById(change.id);
         const previousPath = localById && normalizePath(localById.path) !== normPath
           ? normalizePath(localById.path)
           : null;
+        if (previousPath) {
+          this.assertRemotePathInVault(previousPath, previousPath);
+        }
 
         if (previousPath && !change.isDeleted && !(await this.app.vault.adapter.exists(normPath))) {
           this.watcher.suppress(previousPath);
@@ -518,8 +565,21 @@ export class SyncEngine {
         if (change.isDeleted) {
           const deletePath = previousPath || normPath;
           if (await this.app.vault.adapter.exists(deletePath)) {
+            const record = await this.db.getFile(deletePath);
+            const localBytes = new Uint8Array(await this.app.vault.adapter.readBinary(deletePath));
+            const currentHash = await calculateContentHmac(localBytes, this.hmacKey!);
+            const diverged = !record || record.localHash !== currentHash || record.baseHash !== currentHash;
+            if (diverged) {
+              const deviceName = this.currentSession?.deviceName || 'Device';
+              const conflictPath = normalizePath(formatConflictFilename(deletePath, deviceName));
+              await this.writeVaultFile(conflictPath, localBytes);
+              this.dirtyPaths.add(conflictPath);
+            }
             this.watcher.suppress(deletePath);
             await this.app.vault.adapter.remove(deletePath);
+            if (await this.app.vault.adapter.exists(deletePath)) {
+              this.dirtyPaths.add(deletePath);
+            }
           }
           await this.db.deleteFile(deletePath);
           await this.db.deleteSnapshot(deletePath);
@@ -535,6 +595,7 @@ export class SyncEngine {
         if (!existsLocally) {
           this.watcher.suppress(normPath);
           await this.writeVaultFile(normPath, plainBytes);
+          this.recordPulled(normPath, change.contentHash);
 
           if (isTextFile(normPath)) {
             const text = textDecoder.decode(plainBytes);
@@ -581,10 +642,11 @@ export class SyncEngine {
 
             const mergeResult = threeWayMerge(baseText, localText, remoteText);
 
-            // A partial merge must never silently overwrite either side.
-            // Whenever the merge reports a conflict, the local version is
-            // preserved in a conflict copy and the remote version wins the
-            // main path.
+            // Unconditional conflict copies: a partial merge must never
+            // silently overwrite either side. Whenever the merge reports a
+            // conflict, the local version is preserved in a conflict copy
+            // and the remote version wins the main path.
+            let appliedHash = change.contentHash;
             if (mergeResult.hasConflict) {
               const deviceName = this.currentSession?.deviceName || 'Device';
               const conflictPath = normalizePath(formatConflictFilename(normPath, deviceName));
@@ -594,14 +656,39 @@ export class SyncEngine {
               this.watcher.suppress(normPath);
               await this.app.vault.adapter.write(normPath, remoteText);
               await this.db.setSnapshot(normPath, remoteText, change.contentHash);
+              this.recordPulled(normPath, change.contentHash);
             } else {
+              const mergedHash = await calculateContentHmac(new TextEncoder().encode(mergeResult.mergedText), this.hmacKey!);
+              appliedHash = mergedHash;
               this.watcher.suppress(normPath);
               await this.app.vault.adapter.write(normPath, mergeResult.mergedText);
-              await this.db.setSnapshot(normPath, mergeResult.mergedText, change.contentHash);
+              await this.db.setSnapshot(normPath, mergeResult.mergedText, mergedHash);
+              this.recordPulled(normPath, mergedHash);
             }
+
+            await this.db.setFile({
+              path: normPath,
+              id: change.id,
+              encryptedPath: change.encryptedPath,
+              localHash: appliedHash,
+              baseHash: appliedHash,
+              mtime: change.mtime,
+              size: plainBytes.byteLength,
+              isDeleted: false,
+              syncedVersion: change.version
+            });
+            appliedVersion = Math.max(appliedVersion, change.version);
+            continue;
           } else {
+            if (localHash !== change.contentHash) {
+              const deviceName = this.currentSession?.deviceName || 'Device';
+              const conflictPath = normalizePath(formatConflictFilename(normPath, deviceName));
+              await this.writeVaultFile(conflictPath, localBytes);
+              this.dirtyPaths.add(conflictPath);
+            }
             this.watcher.suppress(normPath);
             await this.writeVaultFile(normPath, plainBytes);
+            this.recordPulled(normPath, change.contentHash);
           }
 
           await this.db.setFile({
@@ -771,6 +858,34 @@ export class SyncEngine {
   }
 
   private async scanAndPush(fullScan: boolean): Promise<number> {
+    if (this.hmacKey && this.recentlyPulled.size > 0) {
+      const now = Date.now();
+      for (const [pulledPath, entry] of Array.from(this.recentlyPulled.entries())) {
+        if (now - entry.at > 10_000) {
+          this.recentlyPulled.delete(pulledPath);
+          continue;
+        }
+        try {
+          if (!(await this.app.vault.adapter.exists(pulledPath))) {
+            const record = await this.db.getFile(pulledPath);
+            if (record && !record.isDeleted) {
+              this.pendingDeletes.add(pulledPath);
+            }
+            this.recentlyPulled.delete(pulledPath);
+            continue;
+          }
+          const currentBytes = new Uint8Array(await this.app.vault.adapter.readBinary(pulledPath));
+          const currentHash = await calculateContentHmac(currentBytes, this.hmacKey);
+          if (currentHash !== entry.hash) {
+            this.dirtyPaths.add(pulledPath);
+            this.recentlyPulled.delete(pulledPath);
+          }
+        } catch {
+          // Best-effort re-verification; leave the entry for the next sync.
+        }
+      }
+    }
+
     const pathsToCheck = new Set<string>();
 
     const claimedDirty = new Set(this.dirtyPaths);
@@ -786,6 +901,18 @@ export class SyncEngine {
     if (fullScan) {
       for (const f of this.app.vault.getFiles()) {
         pathsToCheck.add(normalizePath(f.path));
+      }
+      const records = await this.db.getAllFiles();
+      const vaultPaths = new Set(pathsToCheck);
+      for (const record of records) {
+        if (record.isDeleted) continue;
+        const recordPath = normalizePath(record.path);
+        if (vaultPaths.has(recordPath)) continue;
+        if (recordPath.startsWith(this.configDir) || recordPath.startsWith('.trash') || recordPath.startsWith('.git')) {
+          continue;
+        }
+        if (this.app.vault.getAbstractFileByPath(recordPath)) continue;
+        claimedDeletes.add(recordPath);
       }
     } else {
       for (const p of claimedDirty) {
@@ -812,6 +939,20 @@ export class SyncEngine {
         continue;
       }
       if (this.app.vault.getAbstractFileByPath(path)) tasks.push({ kind: 'file', path });
+    }
+
+    for (const [oldP, newP] of Array.from(claimedRenames.entries())) {
+      const normNew = normalizePath(newP);
+      const deleteHit = Array.from(claimedDeletes).some((d) => normalizePath(d) === normNew);
+      if (deleteHit) {
+        const record = await this.db.getFile(oldP);
+        if (record && !record.isDeleted) {
+          tasks.push({ kind: 'delete', path: oldP });
+        }
+        const fileIdx = tasks.findIndex((t) => t.kind === 'file' && normalizePath(t.path) === normNew);
+        if (fileIdx >= 0) tasks.splice(fileIdx, 1);
+        claimedRenames.delete(oldP);
+      }
     }
 
     if (tasks.length === 0) {
@@ -944,6 +1085,7 @@ export class SyncEngine {
    * the entry (with backoff metadata) for a later replay.
    */
   private async runOutbox(outbox: PendingOutbox): Promise<void> {
+    if (outbox.nextAttemptAt && outbox.nextAttemptAt > Date.now()) return;
     try {
       const commitResult = await this.commitOutbox(outbox);
       await this.applyCommitAckInOrder(outbox, commitResult);

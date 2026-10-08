@@ -97,6 +97,13 @@ function validateFileChange(value: unknown): FileChange {
   ) {
     throw new Error('Invalid file change in server response');
   }
+  if (!value.id || !value.encryptedPath) {
+    throw new Error('Invalid file change in server response');
+  }
+  const contentHash = value.contentHash as string;
+  if (contentHash !== '' && !/^[0-9a-fA-F]{64}$/.test(contentHash)) {
+    throw new Error('Invalid file change in server response');
+  }
   return value as unknown as FileChange;
 }
 
