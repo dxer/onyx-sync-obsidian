@@ -6,7 +6,6 @@ export interface SyncPluginSettings {
   syncInterval: number; // in seconds
   /** Number of complete files processed concurrently (not chunking). */
   syncConcurrency: number;
-  conflictStrategy: 'merge' | 'conflict_file';
 
   // Cached metadata received automatically from session handshake
   cachedVaultId?: string;
@@ -20,8 +19,7 @@ export const DEFAULT_SETTINGS: SyncPluginSettings = {
   passphrase: '',
   autoSync: true,
   syncInterval: 5,
-  syncConcurrency: 3,
-  conflictStrategy: 'merge'
+  syncConcurrency: 3
 };
 
 export type SyncState = 'idle' | 'syncing' | 'error' | 'offline';

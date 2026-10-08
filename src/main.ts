@@ -92,7 +92,6 @@ export default class CloudSyncPlugin extends Plugin {
       autoSync: this.settings.autoSync,
       syncInterval: this.settings.syncInterval,
       syncConcurrency: this.settings.syncConcurrency,
-      conflictStrategy: this.settings.conflictStrategy,
       cachedVaultId: this.settings.cachedVaultId,
       cachedVaultName: this.settings.cachedVaultName,
       cachedDeviceName: this.settings.cachedDeviceName

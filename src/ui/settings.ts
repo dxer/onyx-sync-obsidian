@@ -97,23 +97,7 @@ export class CloudSyncSettingTab extends PluginSettingTab {
           });
       });
 
-    // 5. Conflict Resolution Strategy
-    new Setting(containerEl)
-      .setName(t('conflictStrategyName'))
-      .setDesc(t('conflictStrategyDesc'))
-      .addDropdown((dropdown) =>
-        dropdown
-          .addOption('merge', t('conflictMergeOption'))
-          .addOption('conflict_file', t('conflictCopyOption'))
-          .setValue(this.plugin.settings.conflictStrategy)
-          .onChange((value) => {
-            if (value !== 'merge' && value !== 'conflict_file') return;
-            this.plugin.settings.conflictStrategy = value;
-            this.scheduleSettingsSave();
-          })
-      );
-
-    // 6. Auto Sync
+    // 5. Auto Sync
     new Setting(containerEl)
       .setName(t('autoSyncName'))
       .setDesc(t('autoSyncDesc'))
@@ -126,7 +110,7 @@ export class CloudSyncSettingTab extends PluginSettingTab {
           })
       );
 
-    // 7. Sync Interval
+    // 6. Sync Interval
     new Setting(containerEl)
       .setName(t('syncIntervalName'))
       .setDesc(t('syncIntervalDesc'))
@@ -141,7 +125,7 @@ export class CloudSyncSettingTab extends PluginSettingTab {
         });
       });
 
-    // 8. File Sync Concurrency
+    // 7. File Sync Concurrency
     new Setting(containerEl)
       .setName(t('syncConcurrencyName'))
       .setDesc(t('syncConcurrencyDesc'))
